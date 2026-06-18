@@ -53,8 +53,12 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 		},
 	}
 	s := New(store, crawlRunner{}, nil)
-	if err := s.RunOnce(context.Background(), 1); err != nil {
+	proxyFailureOnly, err := s.RunOnce(context.Background(), 1)
+	if err != nil {
 		t.Fatalf("run once success: %v", err)
+	}
+	if proxyFailureOnly {
+		t.Fatal("expected success run not to report proxy failure only")
 	}
 	if len(store.markedCrawled) != 1 || store.markedCrawled[0] != "ok" {
 		t.Fatalf("marked crawled = %#v", store.markedCrawled)
@@ -66,8 +70,12 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 		},
 	}
 	s = New(store, crawlRunner{err: errors.New("timeout")}, nil)
-	if err := s.RunOnce(context.Background(), 1); err != nil {
+	proxyFailureOnly, err = s.RunOnce(context.Background(), 1)
+	if err != nil {
 		t.Fatalf("run once stale: %v", err)
+	}
+	if proxyFailureOnly {
+		t.Fatal("expected non-proxy failure run not to report proxy failure only")
 	}
 	if len(store.markedFailed) != 1 || store.markedFailed[0] != "stale" {
 		t.Fatalf("marked failed = %#v", store.markedFailed)
@@ -79,8 +87,12 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 		},
 	}
 	s = New(store, crawlRunner{err: api115.ErrDeadShare}, nil)
-	if err := s.RunOnce(context.Background(), 1); err != nil {
+	proxyFailureOnly, err = s.RunOnce(context.Background(), 1)
+	if err != nil {
 		t.Fatalf("run once dead: %v", err)
+	}
+	if proxyFailureOnly {
+		t.Fatal("expected dead share run not to report proxy failure only")
 	}
 	if len(store.markedDead) != 1 || store.markedDead[0] != "dead" {
 		t.Fatalf("marked dead = %#v", store.markedDead)
@@ -136,7 +148,7 @@ func TestSchedulerLogsShareOutcomes(t *testing.T) {
 		},
 	}
 	s := New(store, crawlRunner{}, &buf)
-	if err := s.RunOnce(context.Background(), 1); err != nil {
+	if _, err := s.RunOnce(context.Background(), 1); err != nil {
 		t.Fatalf("run once success: %v", err)
 	}
 	output := buf.String()
@@ -154,7 +166,7 @@ func TestSchedulerLogsShareOutcomes(t *testing.T) {
 		},
 	}
 	s = New(store, crawlRunner{err: api115.ErrDeadShare}, &buf)
-	if err := s.RunOnce(context.Background(), 1); err != nil {
+	if _, err := s.RunOnce(context.Background(), 1); err != nil {
 		t.Fatalf("run once dead: %v", err)
 	}
 	output = buf.String()
@@ -163,7 +175,7 @@ func TestSchedulerLogsShareOutcomes(t *testing.T) {
 	}
 }
 
-func TestSchedulerStopsRunOnceOnProxyFailure(t *testing.T) {
+func TestSchedulerContinuesRunOnceOnProxyFailure(t *testing.T) {
 	var buf bytes.Buffer
 	store := &registryStore{
 		shares: []model.Share{
@@ -172,14 +184,101 @@ func TestSchedulerStopsRunOnceOnProxyFailure(t *testing.T) {
 		},
 	}
 	s := New(store, crawlRunner{err: api115.WrapError(api115.KindProxyFailure, "proxy pool exhausted", 0, nil)}, &buf)
-	err := s.RunOnce(context.Background(), 1)
-	if err == nil || !api115.IsProxyFailure(err) {
-		t.Fatalf("run once err = %v, want proxy failure", err)
+	proxyFailureOnly, err := s.RunOnce(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("run once err = %v, want nil", err)
 	}
-	if len(store.markedFailed) != 1 || store.markedFailed[0] != "first" {
+	if !proxyFailureOnly {
+		t.Fatal("expected proxy failure only run to report proxy failure only")
+	}
+	if len(store.markedFailed) != 2 || store.markedFailed[0] != "first" || store.markedFailed[1] != "second" {
 		t.Fatalf("marked failed = %#v", store.markedFailed)
 	}
-	if bytes.Contains(buf.Bytes(), []byte("share=second")) {
-		t.Fatalf("unexpected second share processing in logs: %q", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte("share=second")) {
+		t.Fatalf("expected second share processing in logs: %q", buf.String())
 	}
+}
+
+func TestSchedulerLoopBacksOffAfterProxyFailureOnlyRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "first", ReceiveCode: "a"},
+		},
+	}
+	s := New(store, crawlRunner{err: api115.WrapError(api115.KindProxyFailure, "proxy pool exhausted", 0, nil)}, nil)
+	var sleeps []time.Duration
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		cancel()
+		return nil
+	}
+	s.now = func() time.Time { return time.Unix(100, 0) }
+
+	if err := s.RunLoop(ctx, time.Minute); err != nil {
+		t.Fatalf("run loop err = %v, want nil", err)
+	}
+	if len(sleeps) != 1 || sleeps[0] != 5*time.Minute {
+		t.Fatalf("sleep durations = %#v, want [5m]", sleeps)
+	}
+}
+
+func TestSchedulerProxyBackoffResetsAfterSuccessfulRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "first", ReceiveCode: "a"},
+		},
+	}
+	runner := &sequenceRunner{
+		errs: []error{
+			api115.WrapError(api115.KindProxyFailure, "proxy pool exhausted", 0, nil),
+			nil,
+		},
+	}
+	s := New(store, runner, nil)
+	var sleeps []time.Duration
+	s.sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		if len(sleeps) == 2 {
+			cancel()
+		}
+		return nil
+	}
+	var tick int64
+	s.now = func() time.Time {
+		tick++
+		return time.Unix(100+tick, 0)
+	}
+
+	if err := s.RunLoop(ctx, time.Minute); err != nil {
+		t.Fatalf("run loop err = %v, want nil", err)
+	}
+	if len(sleeps) != 2 {
+		t.Fatalf("sleep count = %d, want 2", len(sleeps))
+	}
+	if sleeps[0] != 5*time.Minute {
+		t.Fatalf("first sleep = %s, want 5m", sleeps[0])
+	}
+	if sleeps[1] != time.Minute {
+		t.Fatalf("second sleep = %s, want 1m", sleeps[1])
+	}
+}
+
+type sequenceRunner struct {
+	errs  []error
+	calls int
+}
+
+func (r *sequenceRunner) CrawlShare(context.Context, model.Share, int64) error {
+	if r.calls >= len(r.errs) {
+		return nil
+	}
+	err := r.errs[r.calls]
+	r.calls++
+	return err
 }

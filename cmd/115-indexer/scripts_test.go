@@ -23,6 +23,15 @@ func TestInstallScriptUsesCmdEntrypointAndEnvFile(t *testing.T) {
 	if !strings.Contains(text, "-mode daemon") || !strings.Contains(text, "-db ${DB_PATH}") || !strings.Contains(text, "-bleve ${BLEVE_PATH}") || !strings.Contains(text, "-admin-addr ${ADMIN_ADDR}") {
 		t.Fatal("install.sh should start daemon with db, bleve, and admin addr variables")
 	}
+	if !strings.Contains(text, "Restart=on-failure") {
+		t.Fatal("install.sh should restart only on failure")
+	}
+	if !strings.Contains(text, "RestartSec=30") {
+		t.Fatal("install.sh should wait 30 seconds before restart")
+	}
+	if !strings.Contains(text, "StartLimitIntervalSec=600") || !strings.Contains(text, "StartLimitBurst=5") {
+		t.Fatal("install.sh should configure systemd start rate limiting")
+	}
 }
 
 func TestDeployScriptUploadsInstallScriptAndEnvFile(t *testing.T) {

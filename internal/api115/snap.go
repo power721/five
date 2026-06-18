@@ -186,6 +186,10 @@ func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error
 	}
 }
 
+func (c *Client) ListOnceWithProxy(ctx context.Context, req ListRequest, proxyURL string) (SnapResponse, error) {
+	return c.listOnce(ctx, req, proxyURL)
+}
+
 func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string) (SnapResponse, error) {
 	base := c.BaseURL
 	if base == "" {

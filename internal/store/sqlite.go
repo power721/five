@@ -385,7 +385,7 @@ func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Shar
 	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
 		FROM share
-		WHERE status IN ('ACTIVE', 'STALE')
+		WHERE status IN ('ACTIVE', 'STALE', 'QUARANTINE')
 		  AND retry_after_unix <= ?
 		ORDER BY COALESCE(last_crawled_at, 0) ASC, id ASC`, now)
 	if err != nil {

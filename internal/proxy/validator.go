@@ -27,29 +27,13 @@ func (v *HTTPValidator) Validate(ctx context.Context, proxy Proxy) bool {
 		},
 		UserAgent: v.UserAgent,
 		Cookie:    v.Cookie,
-		ProxyPool: singleProxyPool{proxy: api115.ProxyRef{
-			ID:  proxy.ID,
-			URL: proxy.URL,
-		}},
 	}
-	_, err := client.List(ctx, api115.ListRequest{
+	_, err := client.ListOnceWithProxy(ctx, api115.ListRequest{
 		ShareCode:   "healthcheck",
 		ReceiveCode: "healthcheck",
 		CID:         "0",
 		Offset:      0,
 		Limit:       1,
-	})
+	}, proxy.URL)
 	return err == nil || !api115.IsProxyFailure(err)
 }
-
-type singleProxyPool struct {
-	proxy api115.ProxyRef
-}
-
-func (s singleProxyPool) Acquire() (api115.ProxyRef, bool) {
-	return s.proxy, true
-}
-
-func (singleProxyPool) RecordFailure(string) {}
-
-func (singleProxyPool) RecordSuccess(string) {}

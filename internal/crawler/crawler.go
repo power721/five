@@ -66,7 +66,7 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 	activeOffset := 0
 	activePath := ""
 	activeDepth := 0
-	if ok && cp.CID != "" && cp.NextOffset > 0 {
+	if ok && cp.CID != "" && !cp.Visited[cp.CID] {
 		activeCID = cp.CID
 		activeOffset = cp.NextOffset
 		activePath = cp.ActivePath

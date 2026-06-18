@@ -229,6 +229,25 @@ func TestSQLiteStoreShareRegistryAndStateTransitions(t *testing.T) {
 	if len(allShares) != 1 || allShares[0].Status != "QUARANTINE" {
 		t.Fatalf("all shares after repeated failure = %#v", allShares)
 	}
+	due, err = s.ListSharesForCrawl(ctx, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("list shares for crawl after quarantine: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("due shares after quarantine = %d, want 0", len(due))
+	}
+
+	got.RetryAfterUnix = time.Now().Unix() - 1
+	if _, err := s.db.ExecContext(ctx, `UPDATE share SET retry_after_unix=? WHERE share_code=?`, got.RetryAfterUnix, share.ShareCode); err != nil {
+		t.Fatalf("force retry after: %v", err)
+	}
+	due, err = s.ListSharesForCrawl(ctx, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("list shares for crawl after retry due: %v", err)
+	}
+	if len(due) != 1 || due[0].ShareCode != share.ShareCode {
+		t.Fatalf("due shares after retry due = %#v", due)
+	}
 
 	if err := s.MarkShareCrawled(ctx, share.ShareCode, time.Now().Unix()); err != nil {
 		t.Fatalf("mark share crawled: %v", err)

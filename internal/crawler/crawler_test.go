@@ -224,6 +224,62 @@ func TestCrawlerResumesFromNextPageAfterFailure(t *testing.T) {
 	}
 }
 
+func TestCrawlerResumesActiveCIDAfterFailureAtOffsetZero(t *testing.T) {
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"root": {
+				{
+					Nodes: []model.File{
+						{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Season 01", Path: "/Season 01", IsDir: true},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Movie.mkv", Path: "/Movie.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+			"d1": {
+				{
+					Nodes: []model.File{
+						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Path: "/Season 01/Episode 1.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+		},
+		errs: map[string]map[int]error{
+			"d1": {
+				0: context.Canceled,
+			},
+		},
+	}
+	store := &memoryStore{
+		checkpoint: model.Checkpoint{
+			ShareCode:   "swf01d43zby",
+			CID:         "d1",
+			NextOffset:  0,
+			ActivePath:  "/Season 01",
+			ActiveDepth: 1,
+			Queue: []model.CrawlTask{
+				{CID: "root", Path: "", Depth: 0},
+			},
+			Visited: map[string]bool{},
+		},
+		checkpointSeen: true,
+	}
+	c := New(lister, store, Config{PageSize: 100})
+	share := model.Share{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+	}
+
+	delete(lister.errs["d1"], 0)
+	if err := c.CrawlShare(context.Background(), share, 101); err != nil {
+		t.Fatalf("resume crawl share from active cid: %v", err)
+	}
+	if len(lister.calls) == 0 || !strings.HasPrefix(lister.calls[0], "d1:") {
+		t.Fatalf("resume calls = %#v, want first call to active cid d1", lister.calls)
+	}
+}
+
 func TestCrawlerLogsProgress(t *testing.T) {
 	var buf bytes.Buffer
 	prevWriter := log.Writer()

@@ -50,8 +50,10 @@ WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=-/opt/${SERVICE_NAME}/.env
 ExecStart=${INSTALL_DIR}/${BIN_NAME} -mode daemon -db ${DB_PATH} -bleve ${BLEVE_PATH} -admin-addr ${ADMIN_ADDR}
 
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 # 提高文件句柄
 LimitNOFILE=1048576

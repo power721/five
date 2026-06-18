@@ -141,7 +141,7 @@ func main() {
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
 		sched := scheduler.New(s, c, log.Writer())
-		if err := sched.RunOnce(ctx, time.Now().Unix()); err != nil {
+		if _, err := sched.RunOnce(ctx, time.Now().Unix()); err != nil {
 			log.Fatalf("run scheduler once: %v", err)
 		}
 		fmt.Fprintln(os.Stdout, "scheduler run completed")
