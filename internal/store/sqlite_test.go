@@ -187,6 +187,13 @@ func TestSQLiteStoreShareRegistryAndStateTransitions(t *testing.T) {
 	if len(due) != 1 {
 		t.Fatalf("due shares = %d, want 1", len(due))
 	}
+	allShares, err := s.ListShares(ctx)
+	if err != nil {
+		t.Fatalf("list all shares: %v", err)
+	}
+	if len(allShares) != 1 || allShares[0].ShareCode != share.ShareCode {
+		t.Fatalf("all shares = %#v", allShares)
+	}
 
 	if err := s.RecordShareFailure(ctx, share.ShareCode, "timeout"); err != nil {
 		t.Fatalf("record share failure: %v", err)
@@ -214,6 +221,13 @@ func TestSQLiteStoreShareRegistryAndStateTransitions(t *testing.T) {
 	}
 	if got.Status != "QUARANTINE" {
 		t.Fatalf("status after repeated failure = %q, want QUARANTINE", got.Status)
+	}
+	allShares, err = s.ListShares(ctx)
+	if err != nil {
+		t.Fatalf("list all shares after repeated failure: %v", err)
+	}
+	if len(allShares) != 1 || allShares[0].Status != "QUARANTINE" {
+		t.Fatalf("all shares after repeated failure = %#v", allShares)
 	}
 
 	if err := s.MarkShareCrawled(ctx, share.ShareCode, time.Now().Unix()); err != nil {

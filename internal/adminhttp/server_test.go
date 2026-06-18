@@ -14,6 +14,7 @@ import (
 
 type fakeStore struct {
 	shares         []model.Share
+	crawlShares    []model.Share
 	files          []model.File
 	events         []model.IndexEvent
 	upsertedShares []model.Share
@@ -21,6 +22,10 @@ type fakeStore struct {
 }
 
 func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
+	return f.crawlShares, nil
+}
+
+func (f *fakeStore) ListShares(context.Context) ([]model.Share, error) {
 	return f.shares, nil
 }
 
@@ -123,6 +128,9 @@ func TestSharesReturnsAllRegisteredShares(t *testing.T) {
 		shares: []model.Share{
 			{ShareCode: "sw1", ReceiveCode: "a", Status: "ACTIVE", FailureCount: 0},
 			{ShareCode: "sw2", ReceiveCode: "b", Status: "STALE", FailureCount: 2},
+		},
+		crawlShares: []model.Share{
+			{ShareCode: "sw1", ReceiveCode: "a", Status: "ACTIVE", FailureCount: 0},
 		},
 	}
 	srv := New(store, nil)

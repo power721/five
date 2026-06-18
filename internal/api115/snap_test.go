@@ -39,6 +39,31 @@ const sampleSnap = `{
   }
 }`
 
+const sampleSnapFileWithD1 = `{
+  "state": true,
+  "error": "",
+  "errno": 0,
+  "data": {
+    "shareinfo": {
+      "share_state": 1,
+      "receive_code": "echo"
+    },
+    "count": 1,
+    "list": [
+      {
+        "fid": "3427894426982797760",
+        "cid": 3427894426395595300,
+        "n": "Born with Luck.S01E24.2160p.DV.H.265.DDP 5.1.mp4",
+        "s": 4190151605,
+        "d": 1,
+        "ico": "mp4",
+        "sha": "D1EE1E6D4E5F4CEB793EB5E0C73DA7EF4C3C3E3E"
+      }
+    ],
+    "share_state": 1
+  }
+}`
+
 func TestSnapResponsePreservesIDsAndMapsNodes(t *testing.T) {
 	var resp SnapResponse
 	if err := json.Unmarshal([]byte(sampleSnap), &resp); err != nil {
@@ -87,5 +112,19 @@ func TestSnapResponseInvalidShareState(t *testing.T) {
 
 	if resp.ValidShare() {
 		t.Fatal("share_state 0 should not be valid")
+	}
+}
+
+func TestSnapNodeWithFIDIsStillFileWhenDIsOne(t *testing.T) {
+	var resp SnapResponse
+	if err := json.Unmarshal([]byte(sampleSnapFileWithD1), &resp); err != nil {
+		t.Fatalf("unmarshal snap: %v", err)
+	}
+	file := resp.Data.List[0].ToFile("swf01d43zby", "0", "/Born with Luck.S01E24.2160p.DV.H.265.DDP 5.1.mp4", 1, 123)
+	if file.IsDir {
+		t.Fatal("node with fid should be treated as file")
+	}
+	if file.Ext != "mp4" {
+		t.Fatalf("ext = %q, want mp4", file.Ext)
 	}
 }

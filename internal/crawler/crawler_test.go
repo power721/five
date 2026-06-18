@@ -1,7 +1,10 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"strings"
 	"testing"
 
 	"five/internal/model"
@@ -209,5 +212,46 @@ func TestCrawlerResumesFromNextPageAfterFailure(t *testing.T) {
 	}
 	if !seen["f1"] || !seen["f2"] {
 		t.Fatalf("resumed files = %#v, want f1 and f2; calls=%#v upserts=%#v", seen, lister.calls, store.upsertBatches)
+	}
+}
+
+func TestCrawlerLogsProgress(t *testing.T) {
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer log.SetOutput(prevWriter)
+	defer log.SetFlags(prevFlags)
+
+	c := New(&fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.mkv", Path: "/Movie.mkv", Ext: "mkv", Depth: 1},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}, &memoryStore{}, Config{PageSize: 100})
+
+	share := model.Share{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+	}
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "event=crawl_share_started share=swf01d43zby") {
+		t.Fatalf("missing crawl start log: %q", output)
+	}
+	if !strings.Contains(output, "event=crawl_page_fetched share=swf01d43zby cid=0 offset=0 nodes=1 indexed=1 has_more=false") {
+		t.Fatalf("missing crawl page log: %q", output)
+	}
+	if !strings.Contains(output, "event=crawl_share_finished share=swf01d43zby") {
+		t.Fatalf("missing crawl finish log: %q", output)
 	}
 }

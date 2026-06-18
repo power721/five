@@ -359,6 +359,28 @@ func (s *Store) GetShare(ctx context.Context, shareCode string) (model.Share, bo
 	return share, true, nil
 }
 
+func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, status,
+		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
+		FROM share
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []model.Share
+	for rows.Next() {
+		var share model.Share
+		if err := rows.Scan(&share.ShareCode, &share.ReceiveCode, &share.Status,
+			&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version); err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
 func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Share, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version

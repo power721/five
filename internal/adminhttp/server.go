@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"time"
 
 	"five/internal/logutil"
 	"five/internal/model"
@@ -15,6 +14,7 @@ import (
 
 type Store interface {
 	ListSharesForCrawl(ctx context.Context, now int64) ([]model.Share, error)
+	ListShares(ctx context.Context) ([]model.Share, error)
 	UpsertShare(ctx context.Context, share model.Share) error
 	AllFiles(ctx context.Context) ([]model.File, error)
 	PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error)
@@ -68,7 +68,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	shareList, err := s.store.ListSharesForCrawl(ctx, time.Now().Unix())
+	shareList, err := s.store.ListShares(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -138,7 +138,7 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
-	shares, err := s.store.ListSharesForCrawl(r.Context(), time.Now().Unix())
+	shares, err := s.store.ListShares(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

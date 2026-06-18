@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"log"
 	"path"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func New(lister Lister, store Store, cfg Config) *Crawler {
 }
 
 func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt int64) error {
+	log.Printf("event=crawl_share_started share=%s", share.ShareCode)
 	cp, ok, err := c.store.LoadCheckpoint(ctx, share.ShareCode)
 	if err != nil {
 		return err
@@ -107,9 +109,11 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 			}
 			page, err := c.lister.ListPage(ctx, share, task.CID, offset, c.cfg.PageSize)
 			if err != nil {
+				log.Printf("event=crawl_page_failed share=%s cid=%s offset=%d error=%q", share.ShareCode, task.CID, offset, err.Error())
 				return err
 			}
 			if len(page.Nodes) == 0 && !page.HasMore {
+				log.Printf("event=crawl_page_fetched share=%s cid=%s offset=%d nodes=0 indexed=0 has_more=false", share.ShareCode, task.CID, offset)
 				break
 			}
 			for i := range page.Nodes {
@@ -122,6 +126,15 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				page.Nodes[i].ParentID = task.CID
 			}
 			filtered := filterIndexableFiles(page.Nodes)
+			log.Printf(
+				"event=crawl_page_fetched share=%s cid=%s offset=%d nodes=%d indexed=%d has_more=%t",
+				share.ShareCode,
+				task.CID,
+				offset,
+				len(page.Nodes),
+				len(filtered),
+				page.HasMore,
+			)
 			if err := c.store.UpsertFiles(ctx, filtered); err != nil {
 				return err
 			}
@@ -165,7 +178,11 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		Visited:     cloneVisited(visited),
 		UpdatedAt:   time.Now().Unix(),
 	}
-	return c.store.SaveCheckpoint(ctx, finalCP)
+	if err := c.store.SaveCheckpoint(ctx, finalCP); err != nil {
+		return err
+	}
+	log.Printf("event=crawl_share_finished share=%s visited=%d", share.ShareCode, len(finalCP.Visited))
+	return nil
 }
 
 func cloneVisited(in map[string]bool) map[string]bool {

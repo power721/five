@@ -84,6 +84,12 @@ func (n SnapNode) NodeID() string {
 }
 
 func (n SnapNode) IsDir() bool {
+	if n.FID.String() != "" {
+		return false
+	}
+	if n.CID.String() != "" {
+		return true
+	}
 	return n.Dir == 1
 }
 
