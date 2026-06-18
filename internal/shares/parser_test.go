@@ -1,0 +1,85 @@
+package shares
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestParseFileIgnoresMountPathAndFolderID(t *testing.T) {
+	input := strings.NewReader(`# mount_path share_id folder_id code
+/电影/SGNB特效_563部  sw313rp3zx1  1941670173914479227  w146
+/纪录片  sw68md23w8m  root  q353
+`)
+
+	out, err := Parse(input)
+	if err != nil {
+		t.Fatalf("parse shares: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("shares = %d, want 2", len(out))
+	}
+	if out[0].ShareCode != "sw313rp3zx1" || out[0].ReceiveCode != "w146" {
+		t.Fatalf("first share = %#v", out[0])
+	}
+}
+
+func TestParseDeduplicatesShareAndCode(t *testing.T) {
+	input := strings.NewReader(`/a sw1 0 code
+/b sw1 123 code
+`)
+
+	out, err := Parse(input)
+	if err != nil {
+		t.Fatalf("parse shares: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("shares = %d, want 1", len(out))
+	}
+}
+
+func TestParseShareURL(t *testing.T) {
+	share, err := ParseURL("https://115.com/s/swf01d43zby?password=echo")
+	if err != nil {
+		t.Fatalf("parse share url: %v", err)
+	}
+	if share.ShareCode != "swf01d43zby" {
+		t.Fatalf("share code = %q", share.ShareCode)
+	}
+	if share.ReceiveCode != "echo" {
+		t.Fatalf("receive code = %q", share.ReceiveCode)
+	}
+	if share.Status != "ACTIVE" {
+		t.Fatalf("status = %q", share.Status)
+	}
+}
+
+func TestParseShareURLAllowsMissingPassword(t *testing.T) {
+	share, err := ParseURL("https://115.com/s/swf01d43zby")
+	if err != nil {
+		t.Fatalf("parse share url without password: %v", err)
+	}
+	if share.ShareCode != "swf01d43zby" {
+		t.Fatalf("share code = %q", share.ShareCode)
+	}
+	if share.ReceiveCode != "" {
+		t.Fatalf("receive code = %q, want empty", share.ReceiveCode)
+	}
+}
+
+func TestParseAcceptsShareURLsInFile(t *testing.T) {
+	input := strings.NewReader(`# either 4-column format or share URL
+https://115.com/s/swf01d43zby?password=echo
+/电影 sw313rp3zx1 0 w146
+`)
+
+	out, err := Parse(input)
+	if err != nil {
+		t.Fatalf("parse mixed shares: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("shares = %d, want 2", len(out))
+	}
+	if out[0].ShareCode != "swf01d43zby" || out[0].ReceiveCode != "echo" {
+		t.Fatalf("url share = %#v", out[0])
+	}
+}

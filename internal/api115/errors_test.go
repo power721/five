@@ -1,0 +1,332 @@
+package api115
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func TestClassifyHTTPStatusErrors(t *testing.T) {
+	err := ClassifyHTTPError(403, errors.New("forbidden"))
+	if !IsProxyFailure(err) {
+		t.Fatalf("403 should be proxy failure, got %v", err)
+	}
+
+	err = ClassifyHTTPError(504, errors.New("gateway timeout"))
+	if !IsRetryable(err) {
+		t.Fatalf("504 should be retryable, got %v", err)
+	}
+}
+
+func TestClassifySnapResponseErrors(t *testing.T) {
+	resp := SnapResponse{
+		State: false,
+		Error: "receive code error",
+		Errno: 4100017,
+	}
+	err := ClassifySnapError(resp)
+	if !IsDeadShare(err) {
+		t.Fatalf("receive code error should be dead share, got %v", err)
+	}
+
+	resp = SnapResponse{
+		State: true,
+		Data: SnapData{
+			ShareState: 0,
+		},
+	}
+	err = ClassifySnapError(resp)
+	if !IsDeadShare(err) {
+		t.Fatalf("share_state 0 should be dead share, got %v", err)
+	}
+
+	resp = SnapResponse{
+		State: true,
+		Data: SnapData{
+			ShareState: 1,
+			List:       nil,
+			Count:      10,
+		},
+	}
+	err = ClassifySnapError(resp)
+	if !IsRetryable(err) {
+		t.Fatalf("empty data with nonzero count should be retryable, got %v", err)
+	}
+}
+
+func TestClassifiedErrorSupportsErrorsIs(t *testing.T) {
+	err := WrapError(KindProxyFailure, "proxy blocked", http.StatusForbidden, nil)
+	if !errors.Is(err, ErrProxyFailure) {
+		t.Fatalf("expected errors.Is proxy failure, got %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type proxyRecorder struct {
+	acquired []string
+	failed   []string
+	success  []string
+	queue    []ProxyRef
+}
+
+type memoryCookieStore struct {
+	value string
+	saves int
+}
+
+func (m *memoryCookieStore) Load() string {
+	return m.value
+}
+
+func (m *memoryCookieStore) Save(cookie string) {
+	m.value = cookie
+	m.saves++
+}
+
+func (p *proxyRecorder) Acquire() (ProxyRef, bool) {
+	if len(p.queue) == 0 {
+		return ProxyRef{}, false
+	}
+	ref := p.queue[0]
+	p.queue = p.queue[1:]
+	p.acquired = append(p.acquired, ref.ID)
+	return ref, true
+}
+
+func (p *proxyRecorder) RecordFailure(id string) {
+	p.failed = append(p.failed, id)
+}
+
+func (p *proxyRecorder) RecordSuccess(id string) {
+	p.success = append(p.success, id)
+}
+
+func TestClientRetriesWithNextProxyOn403(t *testing.T) {
+	proxy1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer proxy1.Close()
+	proxy2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+		}`)
+	}))
+	defer proxy2.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: proxy1.URL},
+			{ID: "p2", URL: proxy2.URL},
+		},
+	}
+
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("list with proxy retry: %v", err)
+	}
+	if len(recorder.failed) != 1 || recorder.failed[0] != "p1" {
+		t.Fatalf("failed proxies = %#v", recorder.failed)
+	}
+	if len(recorder.success) != 1 || recorder.success[0] != "p2" {
+		t.Fatalf("successful proxies = %#v", recorder.success)
+	}
+}
+
+func TestClientMarksSuccessfulProxy(t *testing.T) {
+	proxy1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+		}`)
+	}))
+	defer proxy1.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: proxy1.URL},
+		},
+	}
+
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("list success with proxy: %v", err)
+	}
+	if len(recorder.success) != 1 || recorder.success[0] != "p1" {
+		t.Fatalf("successful proxies = %#v", recorder.success)
+	}
+}
+
+func TestClientUsesProxyURLForHTTPRequests(t *testing.T) {
+	proxied := false
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+		}`)
+	}))
+	defer proxyServer.Close()
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("request should have gone through proxy server")
+	}))
+	defer targetServer.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: proxyServer.URL},
+		},
+	}
+	client := &Client{
+		BaseURL:    targetServer.URL,
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("list through proxy: %v", err)
+	}
+	if !proxied {
+		t.Fatal("expected proxy server to receive the request")
+	}
+}
+
+func TestClientRejectsInvalidProxyURL(t *testing.T) {
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: "://bad proxy"},
+		},
+	}
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err == nil {
+		t.Fatal("expected invalid proxy URL to fail")
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return
+	}
+	if !strings.Contains(err.Error(), "proxy") {
+		t.Fatalf("unexpected invalid proxy error: %v", err)
+	}
+}
+
+func TestClientSavesSetCookieForLaterRequests(t *testing.T) {
+	store := &memoryCookieStore{}
+	call := 0
+	client := &Client{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				call++
+				if call == 1 {
+					resp := &http.Response{
+						StatusCode: http.StatusOK,
+						Body: io.NopCloser(strings.NewReader(`{
+							"state": true,
+							"error": "",
+							"errno": 0,
+							"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+						}`)),
+						Header: make(http.Header),
+					}
+					resp.Header.Add("Set-Cookie", "sessionid=abc123; Path=/; HttpOnly")
+					return resp, nil
+				}
+				if got := r.Header.Get("cookie"); !strings.Contains(got, "sessionid=abc123") {
+					t.Fatalf("second request cookie header = %q", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{
+						"state": true,
+						"error": "",
+						"errno": 0,
+						"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+					}`)),
+					Header: make(http.Header),
+				}, nil
+			}),
+		},
+		CookieStore: store,
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := client.List(t.Context(), ListRequest{
+			ShareCode:   "swf01d43zby",
+			ReceiveCode: "echo",
+			CID:         "0",
+			Offset:      0,
+			Limit:       20,
+		})
+		if err != nil {
+			t.Fatalf("list call %d: %v", i+1, err)
+		}
+	}
+	if store.saves != 1 {
+		t.Fatalf("cookie saves = %d, want 1", store.saves)
+	}
+	if store.value == "" {
+		t.Fatal("expected cookie to be persisted")
+	}
+}
