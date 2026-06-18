@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -186,5 +187,34 @@ func TestManagerEnsureCapacitySkipsProxyThatFailsValidation(t *testing.T) {
 	p, ok := mgr.Acquire()
 	if !ok || p.ID != "good" {
 		t.Fatalf("acquired proxy = %#v ok=%v, want good", p, ok)
+	}
+}
+
+func TestManagerConcurrentAcquireAndRecordDoesNotLoseState(t *testing.T) {
+	mgr := New(Config{
+		FailureThreshold: 3,
+	})
+	mgr.AddWithProxy(Proxy{ID: "p1", URL: "http://p1", State: StateActive, Deadline: time.Now().Add(time.Minute)})
+	mgr.AddWithProxy(Proxy{ID: "p2", URL: "http://p2", State: StateActive, Deadline: time.Now().Add(time.Minute)})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ref, ok := mgr.Acquire()
+			if ok {
+				mgr.RecordFailure(ref.ID)
+				mgr.RecordSuccess(ref.ID)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if state := mgr.State("p1"); state == "" {
+		t.Fatal("expected p1 to remain addressable")
+	}
+	if state := mgr.State("p2"); state == "" {
+		t.Fatal("expected p2 to remain addressable")
 	}
 }

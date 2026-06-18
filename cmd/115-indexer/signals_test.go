@@ -21,3 +21,15 @@ func TestContextWithSignalsCancelsParentContext(t *testing.T) {
 		t.Fatal("signal context did not cancel with parent context")
 	}
 }
+
+func TestLocalOnlyListenAddr(t *testing.T) {
+	if got := localOnlyListenAddr(":8080"); got != "127.0.0.1:8080" {
+		t.Fatalf("localOnlyListenAddr(:8080) = %q", got)
+	}
+	if got := localOnlyListenAddr("127.0.0.1:8080"); got != "127.0.0.1:8080" {
+		t.Fatalf("localOnlyListenAddr(127.0.0.1:8080) = %q", got)
+	}
+	if got := localOnlyListenAddr("localhost:8080"); got != "localhost:8080" {
+		t.Fatalf("localOnlyListenAddr(localhost:8080) = %q", got)
+	}
+}

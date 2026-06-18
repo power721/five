@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync/atomic"
@@ -51,7 +52,7 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 			{ShareCode: "ok", ReceiveCode: "a"},
 		},
 	}
-	s := New(store, crawlRunner{})
+	s := New(store, crawlRunner{}, nil)
 	if err := s.RunOnce(context.Background(), 1); err != nil {
 		t.Fatalf("run once success: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 			{ShareCode: "stale", ReceiveCode: "a"},
 		},
 	}
-	s = New(store, crawlRunner{err: errors.New("timeout")})
+	s = New(store, crawlRunner{err: errors.New("timeout")}, nil)
 	if err := s.RunOnce(context.Background(), 1); err != nil {
 		t.Fatalf("run once stale: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 			{ShareCode: "dead", ReceiveCode: "a"},
 		},
 	}
-	s = New(store, crawlRunner{err: api115.ErrDeadShare})
+	s = New(store, crawlRunner{err: api115.ErrDeadShare}, nil)
 	if err := s.RunOnce(context.Background(), 1); err != nil {
 		t.Fatalf("run once dead: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestSchedulerLoopStopsWithContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	s := New(emptyRegistry{}, countingRunner{calls: &atomic.Int32{}})
+	s := New(emptyRegistry{}, countingRunner{calls: &atomic.Int32{}}, nil)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.RunLoop(ctx, 10*time.Millisecond)
@@ -124,5 +125,40 @@ func TestSchedulerLoopStopsWithContext(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("scheduler loop did not stop on context cancel")
+	}
+}
+
+func TestSchedulerLogsShareOutcomes(t *testing.T) {
+	var buf bytes.Buffer
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "ok", ReceiveCode: "a"},
+		},
+	}
+	s := New(store, crawlRunner{}, &buf)
+	if err := s.RunOnce(context.Background(), 1); err != nil {
+		t.Fatalf("run once success: %v", err)
+	}
+	output := buf.String()
+	if output == "" {
+		t.Fatal("expected scheduler to write logs")
+	}
+	if !bytes.Contains([]byte(output), []byte("share=ok")) || !bytes.Contains([]byte(output), []byte("result=success")) {
+		t.Fatalf("unexpected success log: %q", output)
+	}
+
+	buf.Reset()
+	store = &registryStore{
+		shares: []model.Share{
+			{ShareCode: "dead", ReceiveCode: "a"},
+		},
+	}
+	s = New(store, crawlRunner{err: api115.ErrDeadShare}, &buf)
+	if err := s.RunOnce(context.Background(), 1); err != nil {
+		t.Fatalf("run once dead: %v", err)
+	}
+	output = buf.String()
+	if !bytes.Contains([]byte(output), []byte("share=dead")) || !bytes.Contains([]byte(output), []byte("result=dead")) {
+		t.Fatalf("unexpected dead log: %q", output)
 	}
 }

@@ -92,6 +92,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS crawl_checkpoint (
 			share_code TEXT PRIMARY KEY,
 			cid TEXT NOT NULL,
+			next_offset INTEGER NOT NULL DEFAULT 0,
+			active_path TEXT NOT NULL DEFAULT '',
+			active_depth INTEGER NOT NULL DEFAULT 0,
 			queue_json TEXT NOT NULL,
 			visited_json TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -210,23 +213,26 @@ func (s *Store) SaveCheckpoint(ctx context.Context, cp model.Checkpoint) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code, cid, queue_json, visited_json, updated_at)
-	VALUES (?, ?, ?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code, cid, next_offset, active_path, active_depth, queue_json, visited_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(share_code) DO UPDATE SET
 		cid=excluded.cid,
+		next_offset=excluded.next_offset,
+		active_path=excluded.active_path,
+		active_depth=excluded.active_depth,
 		queue_json=excluded.queue_json,
 		visited_json=excluded.visited_json,
 		updated_at=excluded.updated_at;`,
-		cp.ShareCode, cp.CID, string(queueJSON), string(visitedJSON), cp.UpdatedAt)
+		cp.ShareCode, cp.CID, cp.NextOffset, cp.ActivePath, cp.ActiveDepth, string(queueJSON), string(visitedJSON), cp.UpdatedAt)
 	return err
 }
 
 func (s *Store) LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT share_code, cid, queue_json, visited_json, updated_at FROM crawl_checkpoint WHERE share_code = ?`, shareCode)
+	row := s.db.QueryRowContext(ctx, `SELECT share_code, cid, next_offset, active_path, active_depth, queue_json, visited_json, updated_at FROM crawl_checkpoint WHERE share_code = ?`, shareCode)
 	var cp model.Checkpoint
 	var queueJSON string
 	var visitedJSON string
-	err := row.Scan(&cp.ShareCode, &cp.CID, &queueJSON, &visitedJSON, &cp.UpdatedAt)
+	err := row.Scan(&cp.ShareCode, &cp.CID, &cp.NextOffset, &cp.ActivePath, &cp.ActiveDepth, &queueJSON, &visitedJSON, &cp.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return model.Checkpoint{}, false, nil
 	}

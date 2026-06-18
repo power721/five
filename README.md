@@ -20,6 +20,21 @@ Out of scope:
 
 ## Run
 
+Proxy is required for all modes that access 115 directly: `crawl`, `run-scheduler-once`, and `daemon`.
+
+Credentials are resolved in this order:
+
+1. `-proxy-key` / `-proxy-password`
+2. environment variables `FIVE_PROXY_KEY` / `FIVE_PROXY_PASSWORD`
+3. `.env` file in the current working directory, or a custom path via `-env-file`
+
+Example `.env`:
+
+```bash
+FIVE_PROXY_KEY=your-proxy-key
+FIVE_PROXY_PASSWORD=your-proxy-password
+```
+
 ```bash
 go run ./cmd/115-indexer \
   -mode crawl \
@@ -56,6 +71,8 @@ go run ./cmd/115-indexer \
 Useful endpoints while running:
 
 - `GET /status` on `admin-addr`: current share count, indexed file count, pending index events
+- `GET /shares` on `admin-addr`: all registered shares with current status and failure state
+- `GET /shares/<share_code>` on `admin-addr`: one share's detailed progress, including checkpoint queue size, visited count, and next page offset
 - `POST /shares` on `admin-addr`: add a new share task while the service is running
 
 Example:

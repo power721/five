@@ -33,11 +33,14 @@ type CrawlTask struct {
 }
 
 type Checkpoint struct {
-	ShareCode string
-	CID       string
-	Queue     []CrawlTask
-	Visited   map[string]bool
-	UpdatedAt int64
+	ShareCode   string
+	CID         string
+	NextOffset  int
+	ActivePath  string
+	ActiveDepth int
+	Queue       []CrawlTask
+	Visited     map[string]bool
+	UpdatedAt   int64
 }
 
 type IndexEvent struct {

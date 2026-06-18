@@ -9,9 +9,17 @@ import (
 
 type fakeLister struct {
 	pages map[string][]Page
+	errs  map[string]map[int]error
+	calls []string
 }
 
 func (f *fakeLister) ListPage(_ context.Context, share model.Share, cid string, offset, limit int) (Page, error) {
+	f.calls = append(f.calls, cid+":"+string(rune('0'+offset)))
+	if errPages, ok := f.errs[cid]; ok {
+		if err, ok := errPages[offset]; ok {
+			return Page{}, err
+		}
+	}
 	list := f.pages[cid]
 	index := offset / limit
 	if index >= len(list) {
@@ -24,9 +32,15 @@ type memoryStore struct {
 	files          []model.File
 	checkpoint     model.Checkpoint
 	checkpointSeen bool
+	upsertBatches  [][]string
 }
 
 func (m *memoryStore) UpsertFiles(_ context.Context, files []model.File) error {
+	batch := make([]string, 0, len(files))
+	for _, f := range files {
+		batch = append(batch, f.FileID)
+	}
+	m.upsertBatches = append(m.upsertBatches, batch)
 	m.files = append(m.files, files...)
 	return nil
 }
@@ -143,5 +157,57 @@ func TestCrawlerFiltersToMediaAndSubtitleFiles(t *testing.T) {
 		if gotExts[i] != wantExts[i] {
 			t.Fatalf("stored exts = %#v, want %#v", gotExts, wantExts)
 		}
+	}
+}
+
+func TestCrawlerResumesFromNextPageAfterFailure(t *testing.T) {
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+					},
+					HasMore: true,
+				},
+				{
+					Nodes: []model.File{
+						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "0", Name: "B.mkv", Path: "/B.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+		},
+		errs: map[string]map[int]error{
+			"0": {
+				1: context.DeadlineExceeded,
+			},
+		},
+	}
+	store := &memoryStore{}
+	c := New(lister, store, Config{PageSize: 1})
+	share := model.Share{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+	}
+
+	if err := c.CrawlShare(context.Background(), share, 100); err == nil {
+		t.Fatal("expected first crawl to fail on second page")
+	}
+	if len(store.files) != 1 {
+		t.Fatalf("stored files after first run = %d, want 1", len(store.files))
+	}
+	t.Logf("checkpoint after first run: cid=%q next_offset=%d queue=%#v visited=%#v", store.checkpoint.CID, store.checkpoint.NextOffset, store.checkpoint.Queue, store.checkpoint.Visited)
+
+	delete(lister.errs["0"], 1)
+	if err := c.CrawlShare(context.Background(), share, 101); err != nil {
+		t.Fatalf("resume crawl share: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, f := range store.files {
+		seen[f.FileID] = true
+	}
+	if !seen["f1"] || !seen["f2"] {
+		t.Fatalf("resumed files = %#v, want f1 and f2; calls=%#v upserts=%#v", seen, lister.calls, store.upsertBatches)
 	}
 }

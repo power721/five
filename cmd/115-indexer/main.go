@@ -39,6 +39,7 @@ func main() {
 		proxyMinAvailable = flag.Int("proxy-min-available", 1, "minimum available proxies to maintain")
 		proxyKey          = flag.String("proxy-key", "", "proxy provider key")
 		proxyPassword     = flag.String("proxy-password", "", "proxy provider password")
+		envFile           = flag.String("env-file", defaultEnvFile, "optional env file path for credentials")
 		metricsAddr       = flag.String("metrics-addr", "", "metrics HTTP listen address, e.g. :9090")
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
 	)
@@ -52,26 +53,27 @@ func main() {
 	}
 	defer s.Close()
 	cookieStore := store.NewCookieStore(s, "")
+	var proxyCfg proxyConfig
+	if needsProxy(*mode) {
+		proxyCfg, err = resolveProxyConfig(*proxyKey, *proxyPassword, *envFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	switch *mode {
 	case "crawl":
 		if *shareCode == "" || *receiveCode == "" {
 			log.Fatal("crawl mode requires -share-code and -receive-code")
 		}
-		var proxyMgr *proxy.Manager
-		if *proxyKey != "" && *proxyPassword != "" {
-			proxyMgr = proxy.New(proxy.Config{})
-			provider := &proxy.Provider{
-				Key:      *proxyKey,
-				Password: *proxyPassword,
-			}
-			validator := &proxy.HTTPValidator{
-				UserAgent: *userAgent,
-				Cookie:    *cookie,
-			}
-			if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
-				log.Fatalf("ensure proxy capacity: %v", err)
-			}
+		proxyMgr := proxy.New(proxy.Config{})
+		provider := newProxyProvider(proxyCfg)
+		validator := &proxy.HTTPValidator{
+			UserAgent: *userAgent,
+			Cookie:    *cookie,
+		}
+		if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
+			log.Fatalf("ensure proxy capacity: %v", err)
 		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
@@ -128,20 +130,14 @@ func main() {
 		}
 		fmt.Fprintf(os.Stdout, "imported %d shares\n", len(parsed))
 	case "run-scheduler-once":
-		var proxyMgr *proxy.Manager
-		if *proxyKey != "" && *proxyPassword != "" {
-			proxyMgr = proxy.New(proxy.Config{})
-			provider := &proxy.Provider{
-				Key:      *proxyKey,
-				Password: *proxyPassword,
-			}
-			validator := &proxy.HTTPValidator{
-				UserAgent: *userAgent,
-				Cookie:    *cookie,
-			}
-			if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
-				log.Fatalf("ensure proxy capacity: %v", err)
-			}
+		proxyMgr := proxy.New(proxy.Config{})
+		provider := newProxyProvider(proxyCfg)
+		validator := &proxy.HTTPValidator{
+			UserAgent: *userAgent,
+			Cookie:    *cookie,
+		}
+		if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
+			log.Fatalf("ensure proxy capacity: %v", err)
 		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
@@ -152,7 +148,7 @@ func main() {
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
-		sched := scheduler.New(s, c)
+		sched := scheduler.New(s, c, log.Writer())
 		if err := sched.RunOnce(ctx, time.Now().Unix()); err != nil {
 			log.Fatalf("run scheduler once: %v", err)
 		}
@@ -173,21 +169,14 @@ func main() {
 				log.Fatalf("update manifest: %v", err)
 			}
 		}
-		var proxyMgr *proxy.Manager
-		var proxyProvider *proxy.Provider
-		if *proxyKey != "" && *proxyPassword != "" {
-			proxyMgr = proxy.New(proxy.Config{})
-			proxyProvider = &proxy.Provider{
-				Key:      *proxyKey,
-				Password: *proxyPassword,
-			}
-			validator := &proxy.HTTPValidator{
-				UserAgent: *userAgent,
-				Cookie:    *cookie,
-			}
-			if err := proxyMgr.EnsureCapacity(ctx, proxyProvider, validator, *proxyMinAvailable); err != nil {
-				log.Fatalf("ensure proxy capacity: %v", err)
-			}
+		proxyMgr := proxy.New(proxy.Config{})
+		proxyProvider := newProxyProvider(proxyCfg)
+		validator := &proxy.HTTPValidator{
+			UserAgent: *userAgent,
+			Cookie:    *cookie,
+		}
+		if err := proxyMgr.EnsureCapacity(ctx, proxyProvider, validator, *proxyMinAvailable); err != nil {
+			log.Fatalf("ensure proxy capacity: %v", err)
 		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
@@ -198,7 +187,16 @@ func main() {
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
-		sched := scheduler.New(s, c)
+		sched := scheduler.New(s, c, log.Writer())
+		log.Printf(
+			"event=daemon_start scheduler_interval=%s index_interval=%s index_batch_size=%d proxy_enabled=%t admin_addr=%q metrics_addr=%q",
+			pollInterval(*schedulerInterval, time.Minute),
+			pollInterval(*indexInterval, 30*time.Second),
+			*indexBatchSize,
+			proxyMgr != nil,
+			localOnlyListenAddr(*adminAddr),
+			*metricsAddr,
+		)
 		var loops []loopFunc
 		loops = append(loops,
 			func(ctx context.Context) error {
@@ -224,6 +222,7 @@ func main() {
 		)
 		if *metricsAddr != "" {
 			loops = append(loops, func(ctx context.Context) error {
+				log.Printf("event=metrics_server_start addr=%q", *metricsAddr)
 				server := &http.Server{
 					Addr:    *metricsAddr,
 					Handler: reg.Handler(),
@@ -248,9 +247,11 @@ func main() {
 		}
 		if *adminAddr != "" {
 			loops = append(loops, func(ctx context.Context) error {
+				addr := localOnlyListenAddr(*adminAddr)
+				log.Printf("event=admin_server_start addr=%q", addr)
 				server := &http.Server{
-					Addr:    *adminAddr,
-					Handler: adminhttp.New(s),
+					Addr:    addr,
+					Handler: adminhttp.New(s, log.Writer()),
 				}
 				errCh := make(chan error, 1)
 				go func() {

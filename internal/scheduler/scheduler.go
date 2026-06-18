@@ -3,11 +3,14 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"time"
 )
 
 import (
 	"five/internal/api115"
+	"five/internal/logutil"
 	"five/internal/model"
 )
 
@@ -25,10 +28,15 @@ type Runner interface {
 type Scheduler struct {
 	registry Registry
 	runner   Runner
+	logger   *log.Logger
 }
 
-func New(registry Registry, runner Runner) *Scheduler {
-	return &Scheduler{registry: registry, runner: runner}
+func New(registry Registry, runner Runner, logWriter io.Writer) *Scheduler {
+	return &Scheduler{
+		registry: registry,
+		runner:   runner,
+		logger:   logutil.New(logWriter),
+	}
 }
 
 func (s *Scheduler) RunOnce(ctx context.Context, now int64) error {
@@ -37,20 +45,24 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) error {
 		return err
 	}
 	for _, share := range shares {
+		s.logger.Printf("event=share_crawl_started share=%s", share.ShareCode)
 		err := s.runner.CrawlShare(ctx, share, now)
 		switch {
 		case err == nil:
 			if err := s.registry.MarkShareCrawled(ctx, share.ShareCode, now); err != nil {
 				return err
 			}
+			s.logger.Printf("event=share_crawl_finished share=%s result=success", share.ShareCode)
 		case errors.Is(err, api115.ErrDeadShare):
 			if err := s.registry.MarkShareDead(ctx, share.ShareCode, err.Error()); err != nil {
 				return err
 			}
+			s.logger.Printf("event=share_crawl_finished share=%s result=dead error=%q", share.ShareCode, err.Error())
 		default:
 			if err := s.registry.RecordShareFailure(ctx, share.ShareCode, err.Error()); err != nil {
 				return err
 			}
+			s.logger.Printf("event=share_crawl_finished share=%s result=failure error=%q", share.ShareCode, err.Error())
 		}
 	}
 	return nil

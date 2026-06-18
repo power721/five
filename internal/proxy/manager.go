@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"five/internal/api115"
@@ -29,6 +30,7 @@ type Proxy struct {
 }
 
 type Manager struct {
+	mu      sync.Mutex
 	cfg     Config
 	proxies []Proxy
 	next    int
@@ -49,10 +51,14 @@ func (m *Manager) Add(id string) {
 }
 
 func (m *Manager) AddWithURL(id, url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.proxies = append(m.proxies, Proxy{ID: id, URL: url, State: StateActive})
 }
 
 func (m *Manager) AddWithProxy(proxy Proxy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if proxy.State == "" {
 		proxy.State = StateActive
 	}
@@ -60,6 +66,8 @@ func (m *Manager) AddWithProxy(proxy Proxy) {
 }
 
 func (m *Manager) AcquireProxy() (Proxy, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.proxies) == 0 {
 		return Proxy{}, false
 	}
@@ -86,6 +94,8 @@ func (m *Manager) Acquire() (api115.ProxyRef, bool) {
 }
 
 func (m *Manager) RecordFailure(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for i := range m.proxies {
 		if m.proxies[i].ID != id {
 			continue
@@ -99,6 +109,8 @@ func (m *Manager) RecordFailure(id string) {
 }
 
 func (m *Manager) RecordSuccess(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for i := range m.proxies {
 		if m.proxies[i].ID != id {
 			continue
@@ -110,6 +122,8 @@ func (m *Manager) RecordSuccess(id string) {
 }
 
 func (m *Manager) Recover(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for i := range m.proxies {
 		if m.proxies[i].ID != id {
 			continue
@@ -120,6 +134,8 @@ func (m *Manager) Recover(id string) {
 }
 
 func (m *Manager) State(id string) State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, p := range m.proxies {
 		if p.ID == id {
 			return p.State
@@ -140,8 +156,16 @@ func (m *Manager) EnsureCapacity(ctx context.Context, provider Fetcher, validato
 	if minAvailable <= 0 || provider == nil {
 		return nil
 	}
+	m.mu.Lock()
 	m.pruneExpired()
-	for m.availableCount() < minAvailable {
+	m.mu.Unlock()
+	for {
+		m.mu.Lock()
+		count := m.availableCount()
+		m.mu.Unlock()
+		if count >= minAvailable {
+			break
+		}
 		p, err := provider.Fetch(ctx)
 		if err != nil {
 			return err

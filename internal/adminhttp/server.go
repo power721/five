@@ -3,9 +3,12 @@ package adminhttp
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"time"
 
+	"five/internal/logutil"
 	"five/internal/model"
 	"five/internal/shares"
 )
@@ -15,6 +18,8 @@ type Store interface {
 	UpsertShare(ctx context.Context, share model.Share) error
 	AllFiles(ctx context.Context) ([]model.File, error)
 	PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error)
+	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
+	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 }
 
 type StatusResponse struct {
@@ -23,18 +28,33 @@ type StatusResponse struct {
 	PendingIndexEvents int `json:"pending_index_events"`
 }
 
-type Server struct {
-	store Store
-	mux   *http.ServeMux
+type ShareProgress struct {
+	ShareCode    string `json:"share_code"`
+	ReceiveCode  string `json:"receive_code"`
+	Status       string `json:"status"`
+	FailureCount int    `json:"failure_count"`
+	LastError    string `json:"last_error"`
+	QueueSize    int    `json:"queue_size,omitempty"`
+	VisitedCount int    `json:"visited_count,omitempty"`
+	NextOffset   int    `json:"next_offset,omitempty"`
+	ActiveCID    string `json:"active_cid,omitempty"`
 }
 
-func New(store Store) *Server {
+type Server struct {
+	store  Store
+	mux    *http.ServeMux
+	logger *log.Logger
+}
+
+func New(store Store, logWriter io.Writer) *Server {
 	s := &Server{
-		store: store,
-		mux:   http.NewServeMux(),
+		store:  store,
+		mux:    http.NewServeMux(),
+		logger: logutil.New(logWriter),
 	}
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/shares", s.handleShares)
+	s.mux.HandleFunc("/shares/", s.handleShareDetail)
 	return s
 }
 
@@ -77,6 +97,10 @@ type addShareRequest struct {
 }
 
 func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleShareList(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -109,7 +133,63 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logger.Printf("event=share_added share=%s receive_code=%q", share.ShareCode, share.ReceiveCode)
 	writeJSON(w, http.StatusCreated, share)
+}
+
+func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
+	shares, err := s.store.ListSharesForCrawl(r.Context(), time.Now().Unix())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]ShareProgress, 0, len(shares))
+	for _, share := range shares {
+		out = append(out, ShareProgress{
+			ShareCode:    share.ShareCode,
+			ReceiveCode:  share.ReceiveCode,
+			Status:       share.Status,
+			FailureCount: share.FailureCount,
+			LastError:    share.LastError,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	shareCode := r.URL.Path[len("/shares/"):]
+	share, ok, err := s.store.GetShare(r.Context(), shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	progress := ShareProgress{
+		ShareCode:    share.ShareCode,
+		ReceiveCode:  share.ReceiveCode,
+		Status:       share.Status,
+		FailureCount: share.FailureCount,
+		LastError:    share.LastError,
+	}
+	cp, ok, err := s.store.LoadCheckpoint(r.Context(), shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if ok {
+		progress.QueueSize = len(cp.Queue)
+		progress.VisitedCount = len(cp.Visited)
+		progress.NextOffset = cp.NextOffset
+		progress.ActiveCID = cp.CID
+	}
+	writeJSON(w, http.StatusOK, progress)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

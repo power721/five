@@ -55,7 +55,17 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		queue = append(queue, cp.Queue...)
 		visited = cp.Visited
 	}
-	if len(queue) == 0 {
+	activeCID := ""
+	activeOffset := 0
+	activePath := ""
+	activeDepth := 0
+	if ok && cp.CID != "" && cp.NextOffset > 0 {
+		activeCID = cp.CID
+		activeOffset = cp.NextOffset
+		activePath = cp.ActivePath
+		activeDepth = cp.ActiveDepth
+	}
+	if len(queue) == 0 && activeCID == "" {
 		queue = append(queue, model.CrawlTask{
 			CID:   RootCID,
 			Path:  "",
@@ -66,16 +76,35 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		visited = map[string]bool{}
 	}
 
-	for len(queue) > 0 {
-		task := queue[0]
-		queue = queue[1:]
+	for activeCID != "" || len(queue) > 0 {
+		var task model.CrawlTask
+		offset := 0
+		if activeCID != "" {
+			task = model.CrawlTask{CID: activeCID, Path: activePath, Depth: activeDepth}
+			activeCID = ""
+			offset = activeOffset
+			activeOffset = 0
+		} else {
+			task = queue[0]
+			queue = queue[1:]
+		}
 		if visited[task.CID] {
 			continue
 		}
-		visited[task.CID] = true
-
-		offset := 0
 		for {
+			cp := model.Checkpoint{
+				ShareCode:   share.ShareCode,
+				CID:         task.CID,
+				NextOffset:  offset,
+				ActivePath:  task.Path,
+				ActiveDepth: task.Depth,
+				Queue:       append([]model.CrawlTask(nil), queue...),
+				Visited:     cloneVisited(visited),
+				UpdatedAt:   time.Now().Unix(),
+			}
+			if err := c.store.SaveCheckpoint(ctx, cp); err != nil {
+				return err
+			}
 			page, err := c.lister.ListPage(ctx, share, task.CID, offset, c.cfg.PageSize)
 			if err != nil {
 				return err
@@ -105,17 +134,21 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 					})
 				}
 			}
-			cp := model.Checkpoint{
-				ShareCode: share.ShareCode,
-				CID:       task.CID,
-				Queue:     append([]model.CrawlTask(nil), queue...),
-				Visited:   cloneVisited(visited),
-				UpdatedAt: time.Now().Unix(),
+			cp = model.Checkpoint{
+				ShareCode:   share.ShareCode,
+				CID:         task.CID,
+				NextOffset:  offset + c.cfg.PageSize,
+				ActivePath:  task.Path,
+				ActiveDepth: task.Depth,
+				Queue:       append([]model.CrawlTask(nil), queue...),
+				Visited:     cloneVisited(visited),
+				UpdatedAt:   time.Now().Unix(),
 			}
 			if err := c.store.SaveCheckpoint(ctx, cp); err != nil {
 				return err
 			}
 			if !page.HasMore {
+				visited[task.CID] = true
 				break
 			}
 			offset += c.cfg.PageSize
@@ -123,11 +156,14 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 	}
 
 	finalCP := model.Checkpoint{
-		ShareCode: share.ShareCode,
-		CID:       RootCID,
-		Queue:     nil,
-		Visited:   cloneVisited(visited),
-		UpdatedAt: time.Now().Unix(),
+		ShareCode:   share.ShareCode,
+		CID:         RootCID,
+		NextOffset:  0,
+		ActivePath:  "",
+		ActiveDepth: 0,
+		Queue:       nil,
+		Visited:     cloneVisited(visited),
+		UpdatedAt:   time.Now().Unix(),
 	}
 	return c.store.SaveCheckpoint(ctx, finalCP)
 }
