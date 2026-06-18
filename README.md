@@ -22,6 +22,8 @@ Out of scope:
 
 Proxy is required for all modes that access 115 directly: `crawl`, `run-scheduler-once`, and `daemon`.
 
+The indexer uses a single active proxy at a time. When the active proxy fails repeatedly, it is discarded and a new proxy is fetched on demand. If several consecutive proxy replacements fail, the service stops instead of continuing to burn through invalid proxies.
+
 Credentials are resolved in this order:
 
 1. `-proxy-key` / `-proxy-password`

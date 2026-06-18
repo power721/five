@@ -1,98 +1,25 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
-	"sync"
+	"errors"
+	"log"
 	"testing"
 	"time"
 )
 
-func TestManagerBlockCooldownAndRecover(t *testing.T) {
-	mgr := New(Config{
-		FailureThreshold: 3,
-	})
-	mgr.Add("p1")
-
-	if _, ok := mgr.Acquire(); !ok {
-		t.Fatal("expected proxy to be available initially")
-	}
-
-	mgr.RecordFailure("p1")
-	mgr.RecordFailure("p1")
-	if state := mgr.State("p1"); state != StateActive {
-		t.Fatalf("state after 2 failures = %q, want ACTIVE", state)
-	}
-
-	mgr.RecordFailure("p1")
-	if state := mgr.State("p1"); state != StateBlocked {
-		t.Fatalf("state after threshold failures = %q, want BLOCKED", state)
-	}
-
-	mgr.Recover("p1")
-	if state := mgr.State("p1"); state != StateCooldown {
-		t.Fatalf("state after recover = %q, want COOLDOWN", state)
-	}
-
-	mgr.RecordSuccess("p1")
-	if state := mgr.State("p1"); state != StateActive {
-		t.Fatalf("state after success = %q, want ACTIVE", state)
-	}
-}
-
-func TestManagerAcquireSkipsBlocked(t *testing.T) {
-	mgr := New(Config{
-		FailureThreshold: 1,
-	})
-	mgr.Add("blocked")
-	mgr.Add("active")
-	mgr.RecordFailure("blocked")
-
-	p, ok := mgr.Acquire()
-	if !ok {
-		t.Fatal("expected an active proxy")
-	}
-	if p.ID != "active" {
-		t.Fatalf("acquired proxy = %q, want active", p.ID)
-	}
-}
-
-func TestManagerAcquireSkipsExpiredProxy(t *testing.T) {
-	now := time.Date(2026, 6, 18, 19, 10, 0, 0, time.UTC)
-	mgr := New(Config{
-		FailureThreshold: 1,
-		Now: func() time.Time {
-			return now
-		},
-	})
-	mgr.AddWithProxy(Proxy{
-		ID:       "expired",
-		URL:      "http://expired",
-		State:    StateActive,
-		Deadline: now.Add(-time.Minute),
-	})
-	mgr.AddWithProxy(Proxy{
-		ID:       "fresh",
-		URL:      "http://fresh",
-		State:    StateActive,
-		Deadline: now.Add(2 * time.Minute),
-	})
-
-	p, ok := mgr.Acquire()
-	if !ok {
-		t.Fatal("expected fresh proxy")
-	}
-	if p.ID != "fresh" {
-		t.Fatalf("acquired proxy = %q, want fresh", p.ID)
-	}
-}
-
 type staticProvider struct {
 	proxy Proxy
 	calls int
+	err   error
 }
 
 func (s *staticProvider) Fetch(context.Context) (Proxy, error) {
 	s.calls++
+	if s.err != nil {
+		return Proxy{}, s.err
+	}
 	return s.proxy, nil
 }
 
@@ -117,50 +44,75 @@ func (s *staticValidator) Validate(_ context.Context, proxy Proxy) bool {
 	return s.results[proxy.ID]
 }
 
-func TestManagerEnsureCapacityFetchesFromProvider(t *testing.T) {
-	now := time.Date(2026, 6, 18, 19, 10, 0, 0, time.UTC)
+func TestManagerAcquireFetchesActiveProxyOnDemand(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 3,
+		Now:              func() time.Time { return now },
+	})
 	provider := &staticProvider{
 		proxy: Proxy{
-			ID:       "fetched",
-			URL:      "http://fetched",
+			ID:       "p1",
+			URL:      "http://p1",
 			State:    StateActive,
 			Deadline: now.Add(3 * time.Minute),
 		},
 	}
-	mgr := New(Config{
-		FailureThreshold: 1,
-		Now: func() time.Time {
-			return now
-		},
-	})
-	if err := mgr.EnsureCapacity(context.Background(), provider, nil, 1); err != nil {
-		t.Fatalf("ensure capacity: %v", err)
+
+	ref, ok := mgr.Acquire(context.Background(), provider, nil)
+	if !ok {
+		t.Fatal("expected manager to fetch proxy on demand")
+	}
+	if ref.ID != "p1" {
+		t.Fatalf("acquired proxy = %#v", ref)
 	}
 	if provider.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1", provider.calls)
 	}
-	p, ok := mgr.Acquire()
-	if !ok || p.ID != "fetched" {
-		t.Fatalf("acquired proxy = %#v ok=%v, want fetched", p, ok)
+}
+
+func TestManagerAcquireReplacesBlockedProxy(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 1,
+		Now:              func() time.Time { return now },
+	})
+	mgr.current = &Proxy{
+		ID:       "bad",
+		URL:      "http://bad",
+		State:    StateActive,
+		Deadline: now.Add(3 * time.Minute),
+	}
+	mgr.RecordFailure("bad")
+
+	provider := &staticProvider{
+		proxy: Proxy{
+			ID:       "good",
+			URL:      "http://good",
+			State:    StateActive,
+			Deadline: now.Add(3 * time.Minute),
+		},
+	}
+
+	ref, ok := mgr.Acquire(context.Background(), provider, nil)
+	if !ok {
+		t.Fatal("expected replacement proxy")
+	}
+	if ref.ID != "good" {
+		t.Fatalf("acquired proxy = %#v, want good", ref)
 	}
 }
 
-func TestManagerEnsureCapacitySkipsProxyThatFailsValidation(t *testing.T) {
-	now := time.Date(2026, 6, 18, 19, 10, 0, 0, time.UTC)
+func TestManagerAcquireSkipsProxyThatFailsValidation(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 1,
+		Now:              func() time.Time { return now },
+	})
 	provider := &sequenceProvider{
 		proxies: []Proxy{
-			{
-				ID:       "bad",
-				URL:      "http://bad",
-				State:    StateActive,
-				Deadline: now.Add(3 * time.Minute),
-			},
-			{
-				ID:       "good",
-				URL:      "http://good",
-				State:    StateActive,
-				Deadline: now.Add(3 * time.Minute),
-			},
+			{ID: "bad", URL: "http://bad", State: StateActive, Deadline: now.Add(3 * time.Minute)},
+			{ID: "good", URL: "http://good", State: StateActive, Deadline: now.Add(3 * time.Minute)},
 		},
 	}
 	validator := &staticValidator{
@@ -169,14 +121,13 @@ func TestManagerEnsureCapacitySkipsProxyThatFailsValidation(t *testing.T) {
 			"good": true,
 		},
 	}
-	mgr := New(Config{
-		FailureThreshold: 1,
-		Now: func() time.Time {
-			return now
-		},
-	})
-	if err := mgr.EnsureCapacity(context.Background(), provider, validator, 1); err != nil {
-		t.Fatalf("ensure capacity with validation: %v", err)
+
+	ref, ok := mgr.Acquire(context.Background(), provider, validator)
+	if !ok {
+		t.Fatal("expected validated proxy")
+	}
+	if ref.ID != "good" {
+		t.Fatalf("acquired proxy = %#v, want good", ref)
 	}
 	if provider.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", provider.calls)
@@ -184,37 +135,91 @@ func TestManagerEnsureCapacitySkipsProxyThatFailsValidation(t *testing.T) {
 	if validator.calls != 2 {
 		t.Fatalf("validator calls = %d, want 2", validator.calls)
 	}
-	p, ok := mgr.Acquire()
-	if !ok || p.ID != "good" {
-		t.Fatalf("acquired proxy = %#v ok=%v, want good", p, ok)
+}
+
+func TestManagerRecordSuccessResetsFailureCount(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 3,
+		Now:              func() time.Time { return now },
+	})
+	mgr.current = &Proxy{
+		ID:       "p1",
+		URL:      "http://p1",
+		State:    StateActive,
+		Deadline: now.Add(3 * time.Minute),
+	}
+
+	mgr.RecordFailure("p1")
+	mgr.RecordFailure("p1")
+	mgr.RecordSuccess("p1")
+
+	if mgr.current == nil {
+		t.Fatal("expected current proxy")
+	}
+	if mgr.current.FailureCount != 0 {
+		t.Fatalf("failure count = %d, want 0", mgr.current.FailureCount)
+	}
+	if mgr.consecutiveReplacements != 0 {
+		t.Fatalf("replacement streak = %d, want 0", mgr.consecutiveReplacements)
 	}
 }
 
-func TestManagerConcurrentAcquireAndRecordDoesNotLoseState(t *testing.T) {
+func TestManagerTripsFatalAfterFiveConsecutiveReplacements(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
 	mgr := New(Config{
-		FailureThreshold: 3,
+		FailureThreshold: 1,
+		FatalThreshold:   5,
+		Now:              func() time.Time { return now },
 	})
-	mgr.AddWithProxy(Proxy{ID: "p1", URL: "http://p1", State: StateActive, Deadline: time.Now().Add(time.Minute)})
-	mgr.AddWithProxy(Proxy{ID: "p2", URL: "http://p2", State: StateActive, Deadline: time.Now().Add(time.Minute)})
 
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ref, ok := mgr.Acquire()
-			if ok {
-				mgr.RecordFailure(ref.ID)
-				mgr.RecordSuccess(ref.ID)
-			}
-		}()
+	for i := 0; i < 5; i++ {
+		id := string(rune('a' + i))
+		mgr.current = &Proxy{
+			ID:       id,
+			URL:      "http://" + id,
+			State:    StateActive,
+			Deadline: now.Add(3 * time.Minute),
+		}
+		mgr.RecordFailure(id)
 	}
-	wg.Wait()
 
-	if state := mgr.State("p1"); state == "" {
-		t.Fatal("expected p1 to remain addressable")
+	if _, ok := mgr.Acquire(context.Background(), &staticProvider{}, nil); ok {
+		t.Fatal("expected manager to stop after fatal threshold")
 	}
-	if state := mgr.State("p2"); state == "" {
-		t.Fatal("expected p2 to remain addressable")
+	if !errors.Is(mgr.FatalError(), ErrProxyFatal) {
+		t.Fatalf("fatal err = %v", mgr.FatalError())
+	}
+}
+
+func TestManagerLogsProxyFatalThreshold(t *testing.T) {
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer log.SetOutput(prevWriter)
+	defer log.SetFlags(prevFlags)
+
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 1,
+		FatalThreshold:   2,
+		Now:              func() time.Time { return now },
+	})
+	for i := 0; i < 2; i++ {
+		id := string(rune('a' + i))
+		mgr.current = &Proxy{
+			ID:       id,
+			URL:      "http://" + id,
+			State:    StateActive,
+			Deadline: now.Add(3 * time.Minute),
+		}
+		mgr.RecordFailure(id)
+	}
+
+	output := logs.String()
+	if !bytes.Contains([]byte(output), []byte("event=proxy_fatal")) || !bytes.Contains([]byte(output), []byte("consecutive_replacements=2")) {
+		t.Fatalf("missing proxy fatal log: %q", output)
 	}
 }

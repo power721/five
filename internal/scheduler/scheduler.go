@@ -63,6 +63,9 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) error {
 				return err
 			}
 			s.logger.Printf("event=share_crawl_finished share=%s result=failure error=%q", share.ShareCode, err.Error())
+			if api115.IsProxyFailure(err) {
+				return err
+			}
 		}
 	}
 	return nil

@@ -74,7 +74,7 @@ func IsDeadShare(err error) bool {
 
 func ClassifyHTTPError(statusCode int, cause error) error {
 	switch statusCode {
-	case http.StatusForbidden:
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:
 		return WrapError(KindProxyFailure, "115 forbidden", statusCode, cause)
 	case http.StatusGatewayTimeout, http.StatusBadGateway, http.StatusTooManyRequests:
 		return WrapError(KindRetryable, "115 upstream unavailable", statusCode, cause)

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"log"
 	"sync"
 	"time"
 
@@ -11,13 +13,15 @@ import (
 type State string
 
 const (
-	StateActive   State = "ACTIVE"
-	StateBlocked  State = "BLOCKED"
-	StateCooldown State = "COOLDOWN"
+	StateActive  State = "ACTIVE"
+	StateBlocked State = "BLOCKED"
 )
+
+var ErrProxyFatal = errors.New("proxy subsystem stopped after consecutive replacements")
 
 type Config struct {
 	FailureThreshold int
+	FatalThreshold   int
 	Now              func() time.Time
 }
 
@@ -29,121 +33,6 @@ type Proxy struct {
 	Deadline     time.Time
 }
 
-type Manager struct {
-	mu      sync.Mutex
-	cfg     Config
-	proxies []Proxy
-	next    int
-}
-
-func New(cfg Config) *Manager {
-	if cfg.FailureThreshold <= 0 {
-		cfg.FailureThreshold = 3
-	}
-	if cfg.Now == nil {
-		cfg.Now = time.Now
-	}
-	return &Manager{cfg: cfg}
-}
-
-func (m *Manager) Add(id string) {
-	m.AddWithURL(id, "")
-}
-
-func (m *Manager) AddWithURL(id, url string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.proxies = append(m.proxies, Proxy{ID: id, URL: url, State: StateActive})
-}
-
-func (m *Manager) AddWithProxy(proxy Proxy) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if proxy.State == "" {
-		proxy.State = StateActive
-	}
-	m.proxies = append(m.proxies, proxy)
-}
-
-func (m *Manager) AcquireProxy() (Proxy, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.proxies) == 0 {
-		return Proxy{}, false
-	}
-	m.pruneExpired()
-	for range m.proxies {
-		p := m.proxies[m.next%len(m.proxies)]
-		m.next++
-		if p.State != StateBlocked {
-			return p, true
-		}
-	}
-	return Proxy{}, false
-}
-
-func (m *Manager) Acquire() (api115.ProxyRef, bool) {
-	p, ok := m.AcquireProxy()
-	if !ok {
-		return api115.ProxyRef{}, false
-	}
-	return api115.ProxyRef{
-		ID:  p.ID,
-		URL: p.URL,
-	}, true
-}
-
-func (m *Manager) RecordFailure(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i := range m.proxies {
-		if m.proxies[i].ID != id {
-			continue
-		}
-		m.proxies[i].FailureCount++
-		if m.proxies[i].FailureCount >= m.cfg.FailureThreshold {
-			m.proxies[i].State = StateBlocked
-		}
-		return
-	}
-}
-
-func (m *Manager) RecordSuccess(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i := range m.proxies {
-		if m.proxies[i].ID != id {
-			continue
-		}
-		m.proxies[i].FailureCount = 0
-		m.proxies[i].State = StateActive
-		return
-	}
-}
-
-func (m *Manager) Recover(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i := range m.proxies {
-		if m.proxies[i].ID != id {
-			continue
-		}
-		m.proxies[i].State = StateCooldown
-		return
-	}
-}
-
-func (m *Manager) State(id string) State {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, p := range m.proxies {
-		if p.ID == id {
-			return p.State
-		}
-	}
-	return ""
-}
-
 type Fetcher interface {
 	Fetch(ctx context.Context) (Proxy, error)
 }
@@ -152,53 +41,96 @@ type Validator interface {
 	Validate(ctx context.Context, proxy Proxy) bool
 }
 
-func (m *Manager) EnsureCapacity(ctx context.Context, provider Fetcher, validator Validator, minAvailable int) error {
-	if minAvailable <= 0 || provider == nil {
-		return nil
+type Manager struct {
+	mu                      sync.Mutex
+	cfg                     Config
+	current                 *Proxy
+	consecutiveReplacements int
+	fatalErr                error
+}
+
+func New(cfg Config) *Manager {
+	if cfg.FailureThreshold <= 0 {
+		cfg.FailureThreshold = 3
 	}
+	if cfg.FatalThreshold <= 0 {
+		cfg.FatalThreshold = 5
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	return &Manager{cfg: cfg}
+}
+
+func (m *Manager) Acquire(ctx context.Context, provider Fetcher, validator Validator) (api115.ProxyRef, bool) {
 	m.mu.Lock()
-	m.pruneExpired()
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+
+	if m.fatalErr != nil {
+		return api115.ProxyRef{}, false
+	}
+	if m.current != nil && m.current.State == StateActive && !m.isExpired(*m.current) {
+		return api115.ProxyRef{ID: m.current.ID, URL: m.current.URL}, true
+	}
+	m.current = nil
+	if provider == nil {
+		return api115.ProxyRef{}, false
+	}
 	for {
-		m.mu.Lock()
-		count := m.availableCount()
-		m.mu.Unlock()
-		if count >= minAvailable {
-			break
-		}
 		p, err := provider.Fetch(ctx)
 		if err != nil {
-			return err
+			return api115.ProxyRef{}, false
 		}
 		if validator != nil && !validator.Validate(ctx, p) {
 			continue
 		}
-		m.AddWithProxy(p)
-	}
-	return nil
-}
-
-func (m *Manager) pruneExpired() {
-	now := m.cfg.Now()
-	keep := m.proxies[:0]
-	for _, p := range m.proxies {
-		if !p.Deadline.IsZero() && !p.Deadline.After(now) {
-			continue
+		if p.State == "" {
+			p.State = StateActive
 		}
-		keep = append(keep, p)
-	}
-	m.proxies = keep
-	if m.next >= len(m.proxies) {
-		m.next = 0
+		m.current = &p
+		return api115.ProxyRef{ID: p.ID, URL: p.URL}, true
 	}
 }
 
-func (m *Manager) availableCount() int {
-	count := 0
-	for _, p := range m.proxies {
-		if p.State != StateBlocked {
-			count++
-		}
+func (m *Manager) RecordFailure(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil || m.current.ID != id {
+		return
 	}
-	return count
+	m.current.FailureCount++
+	if m.current.FailureCount < m.cfg.FailureThreshold {
+		return
+	}
+	m.current.State = StateBlocked
+	m.current = nil
+	m.consecutiveReplacements++
+	if m.consecutiveReplacements >= m.cfg.FatalThreshold {
+		m.fatalErr = ErrProxyFatal
+		log.Printf("event=proxy_fatal consecutive_replacements=%d threshold=%d", m.consecutiveReplacements, m.cfg.FatalThreshold)
+	}
+}
+
+func (m *Manager) RecordSuccess(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil || m.current.ID != id {
+		return
+	}
+	m.current.FailureCount = 0
+	m.current.State = StateActive
+	m.consecutiveReplacements = 0
+}
+
+func (m *Manager) FatalError() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fatalErr
+}
+
+func (m *Manager) isExpired(proxy Proxy) bool {
+	if proxy.Deadline.IsZero() {
+		return false
+	}
+	return !proxy.Deadline.After(m.cfg.Now())
 }

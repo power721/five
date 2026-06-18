@@ -1,8 +1,10 @@
 package api115
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +17,11 @@ func TestClassifyHTTPStatusErrors(t *testing.T) {
 	err := ClassifyHTTPError(403, errors.New("forbidden"))
 	if !IsProxyFailure(err) {
 		t.Fatalf("403 should be proxy failure, got %v", err)
+	}
+
+	err = ClassifyHTTPError(405, errors.New("method not allowed"))
+	if !IsProxyFailure(err) {
+		t.Fatalf("405 should be proxy failure, got %v", err)
 	}
 
 	err = ClassifyHTTPError(504, errors.New("gateway timeout"))
@@ -397,5 +404,53 @@ func TestClientDoesNotFallBackToDirectWhenProxyPoolIsExhausted(t *testing.T) {
 	}
 	if !IsProxyFailure(err) {
 		t.Fatalf("expected proxy failure when proxy pool exhausted, got %v", err)
+	}
+}
+
+func TestClientLogsProxyUsage(t *testing.T) {
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer log.SetOutput(prevWriter)
+	defer log.SetFlags(prevFlags)
+
+	proxy1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+		}`)
+	}))
+	defer proxy1.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "183.166.18.170:11812", URL: proxy1.URL},
+		},
+	}
+
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("list with proxy logging: %v", err)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "event=proxy_request") || !strings.Contains(output, "proxy=183.166.18.170:11812") {
+		t.Fatalf("missing proxy request log: %q", output)
 	}
 }

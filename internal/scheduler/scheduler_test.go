@@ -162,3 +162,24 @@ func TestSchedulerLogsShareOutcomes(t *testing.T) {
 		t.Fatalf("unexpected dead log: %q", output)
 	}
 }
+
+func TestSchedulerStopsRunOnceOnProxyFailure(t *testing.T) {
+	var buf bytes.Buffer
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "first", ReceiveCode: "a"},
+			{ShareCode: "second", ReceiveCode: "b"},
+		},
+	}
+	s := New(store, crawlRunner{err: api115.WrapError(api115.KindProxyFailure, "proxy pool exhausted", 0, nil)}, &buf)
+	err := s.RunOnce(context.Background(), 1)
+	if err == nil || !api115.IsProxyFailure(err) {
+		t.Fatalf("run once err = %v, want proxy failure", err)
+	}
+	if len(store.markedFailed) != 1 || store.markedFailed[0] != "first" {
+		t.Fatalf("marked failed = %#v", store.markedFailed)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("share=second")) {
+		t.Fatalf("unexpected second share processing in logs: %q", buf.String())
+	}
+}

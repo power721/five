@@ -35,8 +35,6 @@ func main() {
 		schedulerInterval = flag.Duration("scheduler-interval", time.Minute, "scheduler polling interval")
 		indexInterval     = flag.Duration("index-interval", 30*time.Second, "incremental index polling interval")
 		indexBatchSize    = flag.Int("index-batch-size", 100, "incremental index batch size")
-		proxyInterval     = flag.Duration("proxy-interval", time.Minute, "proxy refresh polling interval")
-		proxyMinAvailable = flag.Int("proxy-min-available", 1, "minimum available proxies to maintain")
 		proxyKey          = flag.String("proxy-key", "", "proxy provider key")
 		proxyPassword     = flag.String("proxy-password", "", "proxy provider password")
 		envFile           = flag.String("env-file", defaultEnvFile, "optional env file path for credentials")
@@ -72,15 +70,12 @@ func main() {
 			UserAgent: *userAgent,
 			Cookie:    *cookie,
 		}
-		if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
-			log.Fatalf("ensure proxy capacity: %v", err)
-		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
 			Cookie:      *cookie,
 			CookieStore: cookieStore,
 			UserAgent:   *userAgent,
-			ProxyPool:   proxyMgr,
+			ProxyPool:   proxyAccess{manager: proxyMgr, provider: provider, validator: validator},
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
@@ -136,15 +131,12 @@ func main() {
 			UserAgent: *userAgent,
 			Cookie:    *cookie,
 		}
-		if err := proxyMgr.EnsureCapacity(ctx, provider, validator, *proxyMinAvailable); err != nil {
-			log.Fatalf("ensure proxy capacity: %v", err)
-		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
 			Cookie:      *cookie,
 			CookieStore: cookieStore,
 			UserAgent:   *userAgent,
-			ProxyPool:   proxyMgr,
+			ProxyPool:   proxyAccess{manager: proxyMgr, provider: provider, validator: validator},
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
@@ -175,15 +167,12 @@ func main() {
 			UserAgent: *userAgent,
 			Cookie:    *cookie,
 		}
-		if err := proxyMgr.EnsureCapacity(ctx, proxyProvider, validator, *proxyMinAvailable); err != nil {
-			log.Fatalf("ensure proxy capacity: %v", err)
-		}
 		client := &api115.Client{
 			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
 			Cookie:      *cookie,
 			CookieStore: cookieStore,
 			UserAgent:   *userAgent,
-			ProxyPool:   proxyMgr,
+			ProxyPool:   proxyAccess{manager: proxyMgr, provider: proxyProvider, validator: validator},
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
@@ -206,18 +195,6 @@ func main() {
 			func(ctx context.Context) error {
 				reg.IncCounter("daemon_index_loops_total", 1)
 				return builder.RunEventLoop(ctx, manifest.IndexPath, s, *indexBatchSize, pollInterval(*indexInterval, 30*time.Second))
-			},
-			func(ctx context.Context) error {
-				if proxyMgr == nil || proxyProvider == nil {
-					<-ctx.Done()
-					return nil
-				}
-				validator := &proxy.HTTPValidator{
-					UserAgent: *userAgent,
-					Cookie:    *cookie,
-				}
-				reg.IncCounter("daemon_proxy_loops_total", 1)
-				return proxy.RunLoopWithValidator(ctx, proxyMgr, proxyProvider, validator, *proxyMinAvailable, pollInterval(*proxyInterval, time.Minute))
 			},
 		)
 		if *metricsAddr != "" {
@@ -291,6 +268,33 @@ func main() {
 
 type apiLister struct {
 	client *api115.Client
+}
+
+type proxyAccess struct {
+	manager   *proxy.Manager
+	provider  proxy.Fetcher
+	validator proxy.Validator
+}
+
+func (p proxyAccess) Acquire() (api115.ProxyRef, bool) {
+	if p.manager == nil {
+		return api115.ProxyRef{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return p.manager.Acquire(ctx, p.provider, p.validator)
+}
+
+func (p proxyAccess) RecordFailure(id string) {
+	if p.manager != nil {
+		p.manager.RecordFailure(id)
+	}
+}
+
+func (p proxyAccess) RecordSuccess(id string) {
+	if p.manager != nil {
+		p.manager.RecordSuccess(id)
+	}
 }
 
 func (l apiLister) ListPage(ctx context.Context, share model.Share, cid string, offset, limit int) (crawler.Page, error) {

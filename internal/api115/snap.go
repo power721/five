@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -170,6 +171,7 @@ func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error
 		attemptedProxy = true
 		proxyID = ref.ID
 		proxyURL = ref.URL
+		log.Printf("event=proxy_request proxy=%s share=%s cid=%s offset=%d limit=%d", proxyID, req.ShareCode, req.CID, req.Offset, req.Limit)
 		resp, err := c.listOnce(ctx, req, proxyURL)
 		if err == nil {
 			c.ProxyPool.RecordSuccess(proxyID)
