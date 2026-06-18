@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"five/internal/api115"
 	"five/internal/model"
 )
 
@@ -26,7 +27,8 @@ type Store interface {
 }
 
 type Config struct {
-	PageSize int
+	PageSize   int
+	RetryCount int
 }
 
 const RootCID = "0"
@@ -40,6 +42,9 @@ type Crawler struct {
 func New(lister Lister, store Store, cfg Config) *Crawler {
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 100
+	}
+	if cfg.RetryCount <= 0 {
+		cfg.RetryCount = 2
 	}
 	return &Crawler{lister: lister, store: store, cfg: cfg}
 }
@@ -107,10 +112,18 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 			if err := c.store.SaveCheckpoint(ctx, cp); err != nil {
 				return err
 			}
-			page, err := c.lister.ListPage(ctx, share, task.CID, offset, c.cfg.PageSize)
-			if err != nil {
-				log.Printf("event=crawl_page_failed share=%s cid=%s offset=%d error=%q", share.ShareCode, task.CID, offset, err.Error())
-				return err
+			var page Page
+			var err error
+			for attempt := 0; attempt <= c.cfg.RetryCount; attempt++ {
+				page, err = c.lister.ListPage(ctx, share, task.CID, offset, c.cfg.PageSize)
+				if err == nil {
+					break
+				}
+				if !api115.IsRetryable(err) || attempt == c.cfg.RetryCount {
+					log.Printf("event=crawl_page_failed share=%s cid=%s offset=%d error=%q", share.ShareCode, task.CID, offset, err.Error())
+					return err
+				}
+				log.Printf("event=crawl_page_retry share=%s cid=%s offset=%d attempt=%d error=%q", share.ShareCode, task.CID, offset, attempt+1, err.Error())
 			}
 			if len(page.Nodes) == 0 && !page.HasMore {
 				log.Printf("event=crawl_page_fetched share=%s cid=%s offset=%d nodes=0 indexed=0 has_more=false", share.ShareCode, task.CID, offset)

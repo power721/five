@@ -3,10 +3,12 @@ package crawler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"testing"
 
+	"five/internal/api115"
 	"five/internal/model"
 )
 
@@ -14,10 +16,17 @@ type fakeLister struct {
 	pages map[string][]Page
 	errs  map[string]map[int]error
 	calls []string
+	hook  func(share model.Share, cid string, offset, limit int) (Page, error, bool)
 }
 
 func (f *fakeLister) ListPage(_ context.Context, share model.Share, cid string, offset, limit int) (Page, error) {
 	f.calls = append(f.calls, cid+":"+string(rune('0'+offset)))
+	if f.hook != nil {
+		page, err, handled := f.hook(share, cid, offset, limit)
+		if handled {
+			return page, err
+		}
+	}
 	if errPages, ok := f.errs[cid]; ok {
 		if err, ok := errPages[offset]; ok {
 			return Page{}, err
@@ -253,5 +262,45 @@ func TestCrawlerLogsProgress(t *testing.T) {
 	}
 	if !strings.Contains(output, "event=crawl_share_finished share=swf01d43zby") {
 		t.Fatalf("missing crawl finish log: %q", output)
+	}
+}
+
+func TestCrawlerRetriesRetryablePageFailureInPlace(t *testing.T) {
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}
+	store := &memoryStore{}
+	c := New(lister, store, Config{PageSize: 100, RetryCount: 2})
+	share := model.Share{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+	}
+
+	var first bool
+	lister.hook = func(share model.Share, cid string, offset, limit int) (Page, error, bool) {
+		if !first {
+			first = true
+			return Page{}, api115.WrapError(api115.KindRetryable, "transient", 0, errors.New("unexpected EOF")), true
+		}
+		return Page{}, nil, false
+	}
+
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share with retry: %v", err)
+	}
+	if len(store.files) != 1 {
+		t.Fatalf("stored files = %d, want 1", len(store.files))
+	}
+	if len(lister.calls) != 2 {
+		t.Fatalf("list page calls = %#v, want 2 calls on same page", lister.calls)
 	}
 }

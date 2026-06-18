@@ -97,3 +97,12 @@ Rebuild the Bleve index from SQLite:
 ```bash
 go run ./cmd/115-indexer -mode rebuild-index -db data/index.db -bleve data/bleve
 ```
+
+```bash
+curl http://127.0.0.1:8080/status
+
+journalctl -u five -f
+
+sqlite3 /opt/five/data/index.db
+
+```
