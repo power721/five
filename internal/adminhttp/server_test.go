@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,6 +121,41 @@ func TestPostSharesAcceptsShareURL(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "share=swf01d43zby") || !strings.Contains(logs.String(), "event=share_added") {
 		t.Fatalf("unexpected admin log: %q", logs.String())
+	}
+}
+
+func TestPostSharesAcceptsUploadedSharesFile(t *testing.T) {
+	store := &fakeStore{}
+	var logs bytes.Buffer
+	srv := New(store, &logs)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "115_shares.txt")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	_, _ = part.Write([]byte("https://115.com/s/swf01d43zby?password=echo\n/mnt swf01d43zby 0 echo\nhttps://115.com/s/abc123xyz99\n"))
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/shares", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want 201", rr.Code)
+	}
+	if len(store.upsertedShares) != 2 {
+		t.Fatalf("upserted shares = %d, want 2", len(store.upsertedShares))
+	}
+	if store.upsertedShares[0].ShareCode != "swf01d43zby" || store.upsertedShares[1].ShareCode != "abc123xyz99" {
+		t.Fatalf("upserted shares = %#v", store.upsertedShares)
+	}
+	if !strings.Contains(logs.String(), "event=share_batch_added") {
+		t.Fatalf("unexpected batch admin log: %q", logs.String())
 	}
 }
 

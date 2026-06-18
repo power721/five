@@ -3,7 +3,9 @@ package api115
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -82,6 +84,23 @@ func ClassifyHTTPError(statusCode int, cause error) error {
 		}
 		return WrapError(KindUnknown, "115 http error", statusCode, cause)
 	}
+}
+
+func ClassifyRequestError(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(cause, &urlErr) {
+		if urlErr.Timeout() {
+			return WrapError(KindProxyFailure, "proxy timeout", 0, cause)
+		}
+	}
+	var netErr net.Error
+	if errors.As(cause, &netErr) && netErr.Timeout() {
+		return WrapError(KindProxyFailure, "proxy timeout", 0, cause)
+	}
+	return WrapError(KindRetryable, "115 request failed", 0, cause)
 }
 
 func ClassifySnapError(resp SnapResponse) error {

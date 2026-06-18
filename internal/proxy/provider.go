@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -71,10 +72,12 @@ func (p *Provider) Fetch(ctx context.Context) (Proxy, error) {
 	if ttl <= 0 {
 		ttl = 3 * time.Minute
 	}
-	return Proxy{
+	proxy := Proxy{
 		ID:       server,
 		URL:      "http://" + server,
 		State:    StateActive,
 		Deadline: nowFn().Add(ttl),
-	}, nil
+	}
+	log.Printf("event=proxy_fetched proxy=%s deadline=%q", proxy.ID, proxy.Deadline.Format(time.RFC3339))
+	return proxy, nil
 }

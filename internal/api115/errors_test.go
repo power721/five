@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClassifyHTTPStatusErrors(t *testing.T) {
@@ -328,5 +329,73 @@ func TestClientSavesSetCookieForLaterRequests(t *testing.T) {
 	}
 	if store.value == "" {
 		t.Fatal("expected cookie to be persisted")
+	}
+}
+
+func TestClientMarksTimedOutProxyAsFailure(t *testing.T) {
+	timeoutProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer timeoutProxy.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: timeoutProxy.URL},
+		},
+	}
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{Timeout: 10 * time.Millisecond},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err == nil {
+		t.Fatal("expected timeout through proxy to fail")
+	}
+	if len(recorder.failed) != 1 || recorder.failed[0] != "p1" {
+		t.Fatalf("failed proxies = %#v", recorder.failed)
+	}
+	if !IsProxyFailure(err) {
+		t.Fatalf("timeout via proxy should be classified as proxy failure, got %v", err)
+	}
+}
+
+func TestClientDoesNotFallBackToDirectWhenProxyPoolIsExhausted(t *testing.T) {
+	proxy1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer proxy1.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: proxy1.URL},
+		},
+	}
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+		CID:         "0",
+		Offset:      0,
+		Limit:       20,
+	})
+	if err == nil {
+		t.Fatal("expected exhausted proxy pool to fail")
+	}
+	if !IsProxyFailure(err) {
+		t.Fatalf("expected proxy failure when proxy pool exhausted, got %v", err)
 	}
 }

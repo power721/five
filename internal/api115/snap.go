@@ -149,36 +149,39 @@ type ListRequest struct {
 }
 
 func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error) {
-	attempts := 1
-	if c.ProxyPool != nil {
-		attempts = 2
+	if c.ProxyPool == nil {
+		return c.listOnce(ctx, req, "")
 	}
 	var lastErr error
-	for i := 0; i < attempts; i++ {
+	attemptedProxy := false
+	for {
 		proxyID := ""
 		proxyURL := ""
-		if c.ProxyPool != nil {
-			ref, ok := c.ProxyPool.Acquire()
-			if ok {
-				proxyID = ref.ID
-				proxyURL = ref.URL
+		ref, ok := c.ProxyPool.Acquire()
+		if !ok {
+			if attemptedProxy {
+				if lastErr == nil {
+					lastErr = WrapError(KindProxyFailure, "proxy pool exhausted", 0, nil)
+				}
+				return SnapResponse{}, lastErr
 			}
+			return SnapResponse{}, WrapError(KindProxyFailure, "proxy pool exhausted", 0, nil)
 		}
+		attemptedProxy = true
+		proxyID = ref.ID
+		proxyURL = ref.URL
 		resp, err := c.listOnce(ctx, req, proxyURL)
 		if err == nil {
-			if c.ProxyPool != nil && proxyID != "" {
-				c.ProxyPool.RecordSuccess(proxyID)
-			}
+			c.ProxyPool.RecordSuccess(proxyID)
 			return resp, nil
 		}
 		lastErr = err
-		if c.ProxyPool != nil && proxyID != "" && IsProxyFailure(err) {
+		if proxyID != "" && IsProxyFailure(err) {
 			c.ProxyPool.RecordFailure(proxyID)
 			continue
 		}
 		return SnapResponse{}, err
 	}
-	return SnapResponse{}, lastErr
 }
 
 func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string) (SnapResponse, error) {
@@ -226,7 +229,7 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return SnapResponse{}, WrapError(KindRetryable, "115 request failed", 0, err)
+		return SnapResponse{}, ClassifyRequestError(err)
 	}
 	defer resp.Body.Close()
 	if c.CookieStore != nil {

@@ -83,6 +83,13 @@ curl -X POST http://127.0.0.1:8080/shares \
   -d '{"share_url":"https://115.com/s/swf01d43zby?password=echo"}'
 ```
 
+Batch import from `115_shares.txt`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/shares \
+  -F 'file=@115_shares.txt'
+```
+
 Rebuild the Bleve index from SQLite:
 
 ```bash

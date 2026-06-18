@@ -3,9 +3,11 @@ package adminhttp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"five/internal/logutil"
 	"five/internal/model"
@@ -96,6 +98,11 @@ type addShareRequest struct {
 	ReceiveCode string `json:"receive_code"`
 }
 
+type addSharesResponse struct {
+	Added  int           `json:"added"`
+	Shares []model.Share `json:"shares"`
+}
+
 func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		s.handleShareList(w, r)
@@ -105,6 +112,15 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		s.handleShareBatchUpload(w, r)
+		return
+	}
+	s.handleSingleShareAdd(w, r)
+}
+
+func (s *Server) handleSingleShareAdd(w http.ResponseWriter, r *http.Request) {
 	var req addShareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -134,7 +150,36 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Printf("event=share_added share=%s receive_code=%q", share.ShareCode, share.ReceiveCode)
-	writeJSON(w, http.StatusCreated, share)
+	writeJSON(w, http.StatusCreated, addSharesResponse{
+		Added:  1,
+		Shares: []model.Share{share},
+	})
+}
+
+func (s *Server) handleShareBatchUpload(w http.ResponseWriter, r *http.Request) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load uploaded file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	parsed, err := shares.Parse(file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, share := range parsed {
+		if err := s.store.UpsertShare(r.Context(), share); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	s.logger.Printf("event=share_batch_added count=%d", len(parsed))
+	writeJSON(w, http.StatusCreated, addSharesResponse{
+		Added:  len(parsed),
+		Shares: parsed,
+	})
 }
 
 func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
