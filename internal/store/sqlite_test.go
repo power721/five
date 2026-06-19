@@ -359,6 +359,41 @@ func TestSQLiteStoreUpdateShareMeta(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreCountFilesByShare(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Path: "/c.mkv", Ext: "mkv", CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+
+	got, err := s.CountFilesByShare(ctx, "sw1")
+	if err != nil {
+		t.Fatalf("count files sw1: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("sw1 file count = %d, want 2", got)
+	}
+
+	got, err = s.CountFilesByShare(ctx, "missing")
+	if err != nil {
+		t.Fatalf("count files missing: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("missing file count = %d, want 0", got)
+	}
+}
+
 func TestSQLiteStoreExportSnapshotIsSelfContained(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")

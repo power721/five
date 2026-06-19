@@ -23,7 +23,7 @@ type proxyConfig struct {
 
 func needsProxy(mode string) bool {
 	switch mode {
-	case "crawl", "run-scheduler-once", "daemon":
+	case "crawl", "run-scheduler-once", "daemon", "validate-share-counts":
 		return true
 	default:
 		return false

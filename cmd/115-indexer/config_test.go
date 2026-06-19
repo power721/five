@@ -74,7 +74,7 @@ func TestResolveProxyConfigRequiresBothValues(t *testing.T) {
 }
 
 func TestNeedsProxyForMode(t *testing.T) {
-	for _, mode := range []string{"crawl", "run-scheduler-once", "daemon"} {
+	for _, mode := range []string{"crawl", "run-scheduler-once", "daemon", "validate-share-counts"} {
 		if !needsProxy(mode) {
 			t.Fatalf("needsProxy(%q) = false, want true", mode)
 		}

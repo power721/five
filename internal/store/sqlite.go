@@ -449,6 +449,15 @@ func (s *Store) GetShare(ctx context.Context, shareCode string) (model.Share, bo
 	return share, true, nil
 }
 
+func (s *Store) CountFilesByShare(ctx context.Context, shareCode string) (int, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM file WHERE share_code = ?`, shareCode)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version

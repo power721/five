@@ -158,6 +158,28 @@ func main() {
 			log.Fatalf("backfill share meta: %v", err)
 		}
 		fmt.Fprintf(os.Stdout, "backfilled %d of %d shares\n", n, len(parsed))
+	case "validate-share-counts":
+		shares, err := s.ListShares(ctx)
+		if err != nil {
+			log.Fatalf("list shares: %v", err)
+		}
+		client := &api115.Client{
+			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
+			Cookie:      *cookie,
+			CookieStore: cookieStore,
+			UserAgent:   *userAgent,
+		}
+		if cfg, perr := resolveProxyConfig(*proxyKey, *proxyPassword, *envFile); perr == nil {
+			proxyMgr := proxy.New(proxy.Config{})
+			provider := newProxyProvider(cfg)
+			validator := &proxy.HTTPValidator{UserAgent: *userAgent, Cookie: *cookie}
+			client.ProxyPool = proxyAccess{manager: proxyMgr, provider: provider, validator: validator}
+		} else {
+			log.Printf("event=validate_direct reason=%q", perr.Error())
+		}
+		if _, err := validateShareCounts(ctx, client, s, shares, os.Stdout); err != nil {
+			log.Fatalf("validate share counts: %v", err)
+		}
 	case "run-scheduler-once":
 		proxyMgr := proxy.New(proxy.Config{})
 		provider := newProxyProvider(proxyCfg)
