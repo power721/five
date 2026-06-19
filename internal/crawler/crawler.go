@@ -12,8 +12,10 @@ import (
 )
 
 type Page struct {
-	Nodes   []model.File
-	HasMore bool
+	Nodes      []model.File
+	HasMore    bool
+	ShareTitle string
+	FileSize   int64
 }
 
 type Lister interface {
@@ -24,6 +26,7 @@ type Store interface {
 	UpsertFiles(ctx context.Context, files []model.File) error
 	SaveCheckpoint(ctx context.Context, cp model.Checkpoint) error
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
+	UpdateShareMeta(ctx context.Context, shareCode, receiveCode, title string, fileSize int64) error
 }
 
 type Config struct {
@@ -51,6 +54,7 @@ func New(lister Lister, store Store, cfg Config) *Crawler {
 
 func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt int64) error {
 	log.Printf("event=crawl_share_started share=%s", share.ShareCode)
+	metaPersisted := false
 	cp, ok, err := c.store.LoadCheckpoint(ctx, share.ShareCode)
 	if err != nil {
 		return err
@@ -124,6 +128,14 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 					return err
 				}
 				log.Printf("event=crawl_page_retry share=%s cid=%s offset=%d attempt=%d error=%q", share.ShareCode, task.CID, offset, attempt+1, err.Error())
+			}
+			// Share metadata (title/size) is constant per share and present on
+			// every snap page; persist it once on the first page we see.
+			if !metaPersisted && page.ShareTitle != "" {
+				if err := c.store.UpdateShareMeta(ctx, share.ShareCode, share.ReceiveCode, page.ShareTitle, page.FileSize); err != nil {
+					return err
+				}
+				metaPersisted = true
 			}
 			if len(page.Nodes) == 0 && !page.HasMore {
 				log.Printf("event=crawl_page_fetched share=%s cid=%s offset=%d nodes=0 indexed=0 has_more=false", share.ShareCode, task.CID, offset)

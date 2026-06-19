@@ -159,3 +159,16 @@ func TestSnapResponseDecodesShareTitleAndFileSize(t *testing.T) {
 		t.Fatalf("file_size = %d, want 4273516964003", resp.Data.ShareInfo.FileSize)
 	}
 }
+
+func TestSnapNodeDirectoryHasNoExt(t *testing.T) {
+	// A directory whose name contains dots must not be given a bogus extension
+	// (e.g. "电影-欧美高清3.89T" must not yield ext "89T").
+	dir := SnapNode{CID: "2656232060400365768", Name: "电影-欧美高清3.89T"}
+	f := dir.ToFile("sw68wz93ncb", "0", "/电影-欧美高清3.89T", 1, 100)
+	if !f.IsDir {
+		t.Fatal("expected node to be a directory")
+	}
+	if f.Ext != "" {
+		t.Fatalf("directory ext = %q, want empty", f.Ext)
+	}
+}

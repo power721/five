@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -355,6 +356,68 @@ func TestSQLiteStoreUpdateShareMeta(t *testing.T) {
 	}
 	if !ok || got.ShareTitle != "New Share" || got.FileSize != 42 {
 		t.Fatalf("new share meta = %#v ok=%v", got, ok)
+	}
+}
+
+func TestSQLiteStoreExportSnapshotIsSelfContained(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "rc1", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("upsert share: %v", err)
+	}
+	if err := s.UpdateShareMeta(ctx, "sw1", "rc1", "Library One", 12345); err != nil {
+		t.Fatalf("update share meta: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+
+	snapPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := s.ExportSnapshot(ctx, snapPath); err != nil {
+		t.Fatalf("export snapshot: %v", err)
+	}
+	s.Close()
+
+	// Prove self-containment: copy ONLY the snapshot file (no -wal/-shm sidecars)
+	// to a fresh location and confirm all data is present. If anything were still
+	// in a WAL sidecar, this isolated copy would be incomplete.
+	data, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	isolated := filepath.Join(t.TempDir(), "isolated.db")
+	if err := os.WriteFile(isolated, data, 0o644); err != nil {
+		t.Fatalf("write isolated copy: %v", err)
+	}
+
+	snap, err := sql.Open("sqlite", isolated)
+	if err != nil {
+		t.Fatalf("open isolated snapshot: %v", err)
+	}
+	defer snap.Close()
+
+	var files int
+	if err := snap.QueryRowContext(ctx, "SELECT COUNT(*) FROM file").Scan(&files); err != nil {
+		t.Fatalf("count files in snapshot: %v", err)
+	}
+	if files != 1 {
+		t.Fatalf("snapshot file count = %d, want 1", files)
+	}
+	var title string
+	var size int64
+	if err := snap.QueryRowContext(ctx, "SELECT share_title, file_size FROM share WHERE share_code='sw1'").Scan(&title, &size); err != nil {
+		t.Fatalf("query snapshot share: %v", err)
+	}
+	if title != "Library One" || size != 12345 {
+		t.Fatalf("snapshot share meta = (%q, %d), want (Library One, 12345)", title, size)
 	}
 }
 

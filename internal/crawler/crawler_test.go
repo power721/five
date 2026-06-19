@@ -45,6 +45,14 @@ type memoryStore struct {
 	checkpoint     model.Checkpoint
 	checkpointSeen bool
 	upsertBatches  [][]string
+	metaUpdates    []shareMetaUpdate
+}
+
+type shareMetaUpdate struct {
+	shareCode   string
+	receiveCode string
+	title       string
+	size        int64
 }
 
 func (m *memoryStore) UpsertFiles(_ context.Context, files []model.File) error {
@@ -68,6 +76,11 @@ func (m *memoryStore) LoadCheckpoint(_ context.Context, _ string) (model.Checkpo
 		return model.Checkpoint{}, false, nil
 	}
 	return m.checkpoint, true, nil
+}
+
+func (m *memoryStore) UpdateShareMeta(_ context.Context, shareCode, receiveCode, title string, fileSize int64) error {
+	m.metaUpdates = append(m.metaUpdates, shareMetaUpdate{shareCode, receiveCode, title, fileSize})
+	return nil
 }
 
 func TestCrawlerCrawlShareBFSAndCheckpoint(t *testing.T) {
@@ -318,6 +331,49 @@ func TestCrawlerLogsProgress(t *testing.T) {
 	}
 	if !strings.Contains(output, "event=crawl_share_finished share=swf01d43zby") {
 		t.Fatalf("missing crawl finish log: %q", output)
+	}
+}
+
+func TestCrawlerPersistsShareMetadataOncePerCrawl(t *testing.T) {
+	c := New(&fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					ShareTitle: "电影-欧美高清3.89T",
+					FileSize:   4273516964003,
+					Nodes: []model.File{
+						{FileID: "d1", ShareCode: "sw68wz93ncb", ParentID: "0", Name: "Folder", Path: "/Folder", IsDir: true, Depth: 1},
+					},
+					HasMore: false,
+				},
+			},
+			"d1": {
+				{
+					ShareTitle: "电影-欧美高清3.89T",
+					FileSize:   4273516964003,
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "sw68wz93ncb", ParentID: "d1", Name: "x.mkv", Path: "/Folder/x.mkv", Ext: "mkv", Depth: 2},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}, &memoryStore{}, Config{PageSize: 100})
+
+	store := c.store.(*memoryStore)
+	share := model.Share{ShareCode: "sw68wz93ncb", ReceiveCode: "6666"}
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share: %v", err)
+	}
+
+	// Metadata is constant per share, so it must be persisted exactly once even
+	// though every page of every directory carries it.
+	if len(store.metaUpdates) != 1 {
+		t.Fatalf("share meta updates = %d, want exactly 1 per crawl", len(store.metaUpdates))
+	}
+	got := store.metaUpdates[0]
+	if got.shareCode != "sw68wz93ncb" || got.receiveCode != "6666" || got.title != "电影-欧美高清3.89T" || got.size != 4273516964003 {
+		t.Fatalf("unexpected meta update: %#v", got)
 	}
 }
 

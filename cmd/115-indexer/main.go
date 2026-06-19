@@ -41,6 +41,7 @@ func main() {
 		metricsAddr       = flag.String("metrics-addr", "", "metrics HTTP listen address, e.g. :9090")
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
 		backfillDelay     = flag.Duration("backfill-delay", 500*time.Millisecond, "delay between share/snap requests in backfill-share-meta mode")
+		outPath           = flag.String("out", "", "output path for export-db mode, e.g. dist/index.db")
 	)
 	flag.Parse()
 
@@ -294,6 +295,18 @@ func main() {
 			log.Fatalf("update manifest: %v", err)
 		}
 		fmt.Fprintf(os.Stdout, "rebuilt index at %s with %d files\n", manifest.IndexPath, manifest.FileCount)
+	case "export-db":
+		if *outPath == "" {
+			log.Fatal("export-db mode requires -out")
+		}
+		if err := s.ExportSnapshot(ctx, *outPath); err != nil {
+			log.Fatalf("export snapshot: %v", err)
+		}
+		msg := fmt.Sprintf("exported self-contained snapshot to %s", *outPath)
+		if manifest, ok, err := s.LoadManifest(ctx); err == nil && ok {
+			msg += fmt.Sprintf("; package the READY bleve index alongside it: %s", manifest.IndexPath)
+		}
+		fmt.Fprintln(os.Stdout, msg)
 	default:
 		log.Fatalf("unsupported mode %q", *mode)
 	}
@@ -350,7 +363,9 @@ func (l apiLister) ListPage(ctx context.Context, share model.Share, cid string, 
 		nodes = append(nodes, node.ToFile(share.ShareCode, cid, filePath, 0, time.Now().Unix()))
 	}
 	return crawler.Page{
-		Nodes:   nodes,
-		HasMore: offset+limit < resp.Data.Count,
+		Nodes:      nodes,
+		HasMore:    offset+limit < resp.Data.Count,
+		ShareTitle: resp.Data.ShareInfo.ShareTitle,
+		FileSize:   resp.Data.ShareInfo.FileSize,
 	}, nil
 }

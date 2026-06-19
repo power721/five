@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"five/internal/model"
 
@@ -39,6 +40,29 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ExportSnapshot writes a fully-checkpointed, self-contained single-file copy of
+// the database to destPath using VACUUM INTO. The result needs no -wal/-shm
+// sidecar, so it can be archived on its own and shipped to a consumer without
+// risking a near-empty database. destPath must not already exist; an existing
+// file is removed first.
+func (s *Store) ExportSnapshot(ctx context.Context, destPath string) error {
+	if dir := filepath.Dir(destPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// VACUUM INTO takes a string expression; bind it as a quoted literal so the
+	// path is escaped safely (no driver-specific parameter quirks).
+	quoted := "'" + strings.ReplaceAll(destPath, "'", "''") + "'"
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO "+quoted); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", destPath, err)
+	}
+	return nil
 }
 
 func (s *Store) execPragmas(ctx context.Context) error {

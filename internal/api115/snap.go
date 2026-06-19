@@ -97,9 +97,12 @@ func (n SnapNode) IsDir() bool {
 }
 
 func (n SnapNode) ToFile(shareCode, parentID, filePath string, depth int, crawledAt int64) model.File {
-	ext := strings.TrimPrefix(path.Ext(n.Name), ".")
-	if ext == "" && !n.IsDir() {
-		ext = n.ICO
+	ext := ""
+	if !n.IsDir() {
+		ext = strings.TrimPrefix(path.Ext(n.Name), ".")
+		if ext == "" {
+			ext = n.ICO
+		}
 	}
 	updatedAt, _ := strconv.ParseInt(n.Time.String(), 10, 64)
 	return model.File{
