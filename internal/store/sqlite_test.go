@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -297,5 +298,116 @@ func TestSQLiteStoreKVAndCookieStore(t *testing.T) {
 	cookies.Save("sessionid=xyz789")
 	if got := cookies.Load(); got != "sessionid=xyz789" {
 		t.Fatalf("cookie store value = %q", got)
+	}
+}
+
+func TestSQLiteStoreUpdateShareMeta(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw68wz93ncb", ReceiveCode: "6666", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("upsert share: %v", err)
+	}
+
+	if err := s.UpdateShareMeta(ctx, "sw68wz93ncb", "6666", "电影-欧美高清3.89T", 4273516964003); err != nil {
+		t.Fatalf("update share meta: %v", err)
+	}
+
+	got, ok, err := s.GetShare(ctx, "sw68wz93ncb")
+	if err != nil {
+		t.Fatalf("get share: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected share to exist")
+	}
+	if got.ShareTitle != "电影-欧美高清3.89T" {
+		t.Fatalf("share_title = %q", got.ShareTitle)
+	}
+	if got.FileSize != 4273516964003 {
+		t.Fatalf("file_size = %d", got.FileSize)
+	}
+
+	// Re-importing the share (import-shares re-run) must not wipe backfilled metadata.
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw68wz93ncb", ReceiveCode: "6666", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("re-upsert share: %v", err)
+	}
+	got, _, err = s.GetShare(ctx, "sw68wz93ncb")
+	if err != nil {
+		t.Fatalf("get share after reimport: %v", err)
+	}
+	if got.ShareTitle != "电影-欧美高清3.89T" || got.FileSize != 4273516964003 {
+		t.Fatalf("metadata wiped by reimport: title=%q size=%d", got.ShareTitle, got.FileSize)
+	}
+
+	// Backfilling a share that was never imported should register it.
+	if err := s.UpdateShareMeta(ctx, "swnew", "pw", "New Share", 42); err != nil {
+		t.Fatalf("update share meta for new share: %v", err)
+	}
+	got, ok, err = s.GetShare(ctx, "swnew")
+	if err != nil {
+		t.Fatalf("get new share: %v", err)
+	}
+	if !ok || got.ShareTitle != "New Share" || got.FileSize != 42 {
+		t.Fatalf("new share meta = %#v ok=%v", got, ok)
+	}
+}
+
+func TestSQLiteStoreMigrationAddsShareMetaColumnsToExistingDB(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	// Simulate a pre-existing deployment whose share table predates the new columns.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE share (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		share_code TEXT NOT NULL,
+		receive_code TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'ACTIVE',
+		last_crawled_at INTEGER,
+		last_error TEXT,
+		failure_count INTEGER NOT NULL DEFAULT 0,
+		retry_after_unix INTEGER NOT NULL DEFAULT 0,
+		version INTEGER NOT NULL DEFAULT 0,
+		UNIQUE(share_code, receive_code)
+	)`); err != nil {
+		t.Fatalf("create legacy share: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO share(share_code, receive_code) VALUES('sw1','rc1')`); err != nil {
+		t.Fatalf("seed legacy share: %v", err)
+	}
+	raw.Close()
+
+	// Opening through the store must migrate the table in place.
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store (migrate): %v", err)
+	}
+	defer s.Close()
+
+	got, ok, err := s.GetShare(ctx, "sw1")
+	if err != nil {
+		t.Fatalf("get migrated share: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected legacy share to survive migration")
+	}
+	if got.ShareTitle != "" || got.FileSize != 0 {
+		t.Fatalf("expected default meta, got title=%q size=%d", got.ShareTitle, got.FileSize)
+	}
+	if err := s.UpdateShareMeta(ctx, "sw1", "rc1", "T", 7); err != nil {
+		t.Fatalf("update meta after migrate: %v", err)
+	}
+	got, _, _ = s.GetShare(ctx, "sw1")
+	if got.ShareTitle != "T" || got.FileSize != 7 {
+		t.Fatalf("post-migrate update failed: %#v", got)
 	}
 }

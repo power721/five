@@ -128,3 +128,34 @@ func TestSnapNodeWithFIDIsStillFileWhenDIsOne(t *testing.T) {
 		t.Fatalf("ext = %q, want mp4", file.Ext)
 	}
 }
+
+const sampleSnapShareInfo = `{
+  "state": true,
+  "error": "",
+  "errno": 0,
+  "data": {
+    "shareinfo": {
+      "snap_id": "306956441",
+      "file_size": 4273516964003,
+      "share_title": "电影-欧美高清3.89T",
+      "share_state": 1,
+      "receive_code": "6666"
+    },
+    "count": 1,
+    "list": [],
+    "share_state": 1
+  }
+}`
+
+func TestSnapResponseDecodesShareTitleAndFileSize(t *testing.T) {
+	var resp SnapResponse
+	if err := json.Unmarshal([]byte(sampleSnapShareInfo), &resp); err != nil {
+		t.Fatalf("unmarshal snap: %v", err)
+	}
+	if resp.Data.ShareInfo.ShareTitle != "电影-欧美高清3.89T" {
+		t.Fatalf("share_title = %q, want 电影-欧美高清3.89T", resp.Data.ShareInfo.ShareTitle)
+	}
+	if resp.Data.ShareInfo.FileSize != 4273516964003 {
+		t.Fatalf("file_size = %d, want 4273516964003", resp.Data.ShareInfo.FileSize)
+	}
+}

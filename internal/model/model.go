@@ -18,6 +18,8 @@ type File struct {
 type Share struct {
 	ShareCode      string
 	ReceiveCode    string
+	ShareTitle     string
+	FileSize       int64
 	Status         string
 	LastCrawledAt  int64
 	LastError      string

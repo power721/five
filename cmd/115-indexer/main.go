@@ -40,6 +40,7 @@ func main() {
 		envFile           = flag.String("env-file", defaultEnvFile, "optional env file path for credentials")
 		metricsAddr       = flag.String("metrics-addr", "", "metrics HTTP listen address, e.g. :9090")
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
+		backfillDelay     = flag.Duration("backfill-delay", 500*time.Millisecond, "delay between share/snap requests in backfill-share-meta mode")
 	)
 	flag.Parse()
 
@@ -124,6 +125,38 @@ func main() {
 			}
 		}
 		fmt.Fprintf(os.Stdout, "imported %d shares\n", len(parsed))
+	case "backfill-share-meta":
+		f, err := os.Open(*sharesFile)
+		if err != nil {
+			log.Fatalf("open shares file: %v", err)
+		}
+		defer f.Close()
+		parsed, err := shares.Parse(f)
+		if err != nil {
+			log.Fatalf("parse shares file: %v", err)
+		}
+		client := &api115.Client{
+			HTTPClient:  &http.Client{Timeout: 20 * time.Second},
+			Cookie:      *cookie,
+			CookieStore: cookieStore,
+			UserAgent:   *userAgent,
+		}
+		// Route through the proxy pool when credentials are available; the
+		// share/snap endpoint is easily rate-limited from a single IP. Fall
+		// back to a direct request when no proxy is configured.
+		if cfg, perr := resolveProxyConfig(*proxyKey, *proxyPassword, *envFile); perr == nil {
+			proxyMgr := proxy.New(proxy.Config{})
+			provider := newProxyProvider(cfg)
+			validator := &proxy.HTTPValidator{UserAgent: *userAgent, Cookie: *cookie}
+			client.ProxyPool = proxyAccess{manager: proxyMgr, provider: provider, validator: validator}
+		} else {
+			log.Printf("event=backfill_direct reason=%q", perr.Error())
+		}
+		n, err := backfillShareMeta(ctx, client, s, parsed, *backfillDelay, os.Stdout)
+		if err != nil {
+			log.Fatalf("backfill share meta: %v", err)
+		}
+		fmt.Fprintf(os.Stdout, "backfilled %d of %d shares\n", n, len(parsed))
 	case "run-scheduler-once":
 		proxyMgr := proxy.New(proxy.Config{})
 		provider := newProxyProvider(proxyCfg)

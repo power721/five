@@ -62,6 +62,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			share_code TEXT NOT NULL,
 			receive_code TEXT NOT NULL,
+			share_title TEXT NOT NULL DEFAULT '',
+			file_size INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'ACTIVE',
 			last_crawled_at INTEGER,
 			last_error TEXT,
@@ -122,6 +124,56 @@ func (s *Store) migrate(ctx context.Context) error {
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	// Add columns introduced after the first release to already-deployed databases.
+	if err := s.ensureColumns(ctx, "share", []columnDef{
+		{name: "share_title", ddl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "file_size", ddl: "INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return fmt.Errorf("migrate share columns: %w", err)
+	}
+	return nil
+}
+
+type columnDef struct {
+	name string
+	ddl  string
+}
+
+// ensureColumns adds any missing columns to an existing table. Table and column
+// names are compile-time constants, so the formatted DDL is safe.
+func (s *Store) ensureColumns(ctx context.Context, table string, cols []columnDef) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notNull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, col := range cols {
+		if existing[col.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col.name, col.ddl)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -343,12 +395,26 @@ func (s *Store) UpsertShare(ctx context.Context, share model.Share) error {
 	return err
 }
 
+// UpdateShareMeta records share metadata fetched from 115 (the share title and
+// total size). It registers the share if it is not present yet, and never touches
+// the crawl status/bookkeeping columns, so it is safe to re-run and is not undone
+// by a later import-shares.
+func (s *Store) UpdateShareMeta(ctx context.Context, shareCode, receiveCode, title string, fileSize int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO share(share_code, receive_code, share_title, file_size, status)
+	VALUES (?, ?, ?, ?, 'ACTIVE')
+	ON CONFLICT(share_code, receive_code) DO UPDATE SET
+		share_title=excluded.share_title,
+		file_size=excluded.file_size;`,
+		shareCode, receiveCode, title, fileSize)
+	return err
+}
+
 func (s *Store) GetShare(ctx context.Context, shareCode string) (model.Share, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT share_code, receive_code, status,
+	row := s.db.QueryRowContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
 		FROM share WHERE share_code = ? ORDER BY id DESC LIMIT 1`, shareCode)
 	var share model.Share
-	err := row.Scan(&share.ShareCode, &share.ReceiveCode, &share.Status,
+	err := row.Scan(&share.ShareCode, &share.ReceiveCode, &share.ShareTitle, &share.FileSize, &share.Status,
 		&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version)
 	if err == sql.ErrNoRows {
 		return model.Share{}, false, nil
@@ -360,7 +426,7 @@ func (s *Store) GetShare(ctx context.Context, shareCode string) (model.Share, bo
 }
 
 func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, status,
+	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
 		FROM share
 		ORDER BY id ASC`)
@@ -372,7 +438,7 @@ func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
 	var shares []model.Share
 	for rows.Next() {
 		var share model.Share
-		if err := rows.Scan(&share.ShareCode, &share.ReceiveCode, &share.Status,
+		if err := rows.Scan(&share.ShareCode, &share.ReceiveCode, &share.ShareTitle, &share.FileSize, &share.Status,
 			&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version); err != nil {
 			return nil, err
 		}
@@ -382,7 +448,7 @@ func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
 }
 
 func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Share, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, status,
+	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
 		FROM share
 		WHERE status IN ('ACTIVE', 'STALE', 'QUARANTINE')
@@ -396,7 +462,7 @@ func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Shar
 	var shares []model.Share
 	for rows.Next() {
 		var share model.Share
-		if err := rows.Scan(&share.ShareCode, &share.ReceiveCode, &share.Status,
+		if err := rows.Scan(&share.ShareCode, &share.ReceiveCode, &share.ShareTitle, &share.FileSize, &share.Status,
 			&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version); err != nil {
 			return nil, err
 		}

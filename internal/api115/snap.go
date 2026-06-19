@@ -54,6 +54,8 @@ type SnapData struct {
 type SnapShareInfo struct {
 	ShareState  int    `json:"share_state"`
 	ReceiveCode string `json:"receive_code"`
+	ShareTitle  string `json:"share_title"`
+	FileSize    int64  `json:"file_size"`
 }
 
 type SnapNode struct {
