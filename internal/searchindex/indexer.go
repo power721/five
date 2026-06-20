@@ -108,11 +108,21 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 }
 
 func (b *Builder) ApplyPendingEvents(ctx context.Context, indexPath string, provider EventProvider, limit int) error {
-	_, err := b.applyPendingEvents(ctx, indexPath, provider, limit)
+	index, err := bleve.Open(indexPath)
+	if err != nil {
+		return err
+	}
+	defer index.Close()
+	_, err = b.applyInto(ctx, index, provider, limit)
 	return err
 }
 
-func (b *Builder) applyPendingEvents(ctx context.Context, indexPath string, provider EventProvider, limit int) (int, error) {
+// applyInto applies up to limit pending events into the already-open index and
+// marks them processed. It intentionally does NOT open or close the index: the
+// caller owns the handle so it can be reused across batches. Closing scorch on
+// every batch kills its background segment merger, so segments accumulate until
+// each Open/Batch grinds to a halt — which is what stalled the consumer.
+func (b *Builder) applyInto(ctx context.Context, index bleve.Index, provider EventProvider, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -123,17 +133,6 @@ func (b *Builder) applyPendingEvents(ctx context.Context, indexPath string, prov
 	if len(events) == 0 {
 		return 0, nil
 	}
-
-	index, err := bleve.Open(indexPath)
-	if err != nil {
-		return 0, err
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = index.Close()
-		}
-	}()
 
 	batch := index.NewBatch()
 	var processed []int64
@@ -164,10 +163,6 @@ func (b *Builder) applyPendingEvents(ctx context.Context, indexPath string, prov
 	if err := index.Batch(batch); err != nil {
 		return 0, err
 	}
-	if err := index.Close(); err != nil {
-		return 0, err
-	}
-	closed = true
 	if len(processed) > 0 {
 		if err := provider.MarkIndexEventsProcessed(ctx, processed); err != nil {
 			return 0, err
@@ -206,11 +201,20 @@ func (b *Builder) RunEventLoop(ctx context.Context, indexPath string, provider E
 	if interval <= 0 {
 		interval = time.Minute
 	}
+	// Open the index ONCE and reuse it across batches. Opening/closing per batch
+	// terminates scorch's background segment merger every cycle, so segments pile
+	// up and every subsequent Open/Batch gets slower until throughput collapses.
+	index, err := bleve.Open(indexPath)
+	if err != nil {
+		return err
+	}
+	defer index.Close()
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
-		processed, err := b.applyPendingEvents(ctx, indexPath, provider, limit)
+		processed, err := b.applyInto(ctx, index, provider, limit)
 		if err != nil {
 			return err
 		}
