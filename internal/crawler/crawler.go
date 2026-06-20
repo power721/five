@@ -88,6 +88,9 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 	}
 
 	for activeCID != "" || len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var task model.CrawlTask
 		offset := 0
 		if activeCID != "" {
@@ -103,6 +106,9 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 			continue
 		}
 		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			cp := model.Checkpoint{
 				ShareCode:   share.ShareCode,
 				CID:         task.CID,

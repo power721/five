@@ -344,11 +344,11 @@ type proxyAccess struct {
 	validator proxy.Validator
 }
 
-func (p proxyAccess) Acquire() (api115.ProxyRef, bool) {
+func (p proxyAccess) Acquire(ctx context.Context) (api115.ProxyRef, bool) {
 	if p.manager == nil {
 		return api115.ProxyRef{}, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return p.manager.Acquire(ctx, p.provider, p.validator)
 }

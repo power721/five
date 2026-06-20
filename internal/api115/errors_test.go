@@ -2,6 +2,7 @@ package api115
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -104,7 +105,7 @@ func (m *memoryCookieStore) Clear() {
 	m.value = ""
 }
 
-func (p *proxyRecorder) Acquire() (ProxyRef, bool) {
+func (p *proxyRecorder) Acquire(context.Context) (ProxyRef, bool) {
 	if len(p.queue) == 0 {
 		return ProxyRef{}, false
 	}

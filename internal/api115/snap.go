@@ -142,7 +142,7 @@ type ProxyRef struct {
 }
 
 type ProxyPool interface {
-	Acquire() (ProxyRef, bool)
+	Acquire(ctx context.Context) (ProxyRef, bool)
 	RecordFailure(id string)
 	RecordSuccess(id string)
 }
@@ -163,9 +163,12 @@ func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error
 	attemptedProxy := false
 	prevProxyID := ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return SnapResponse{}, err
+		}
 		proxyID := ""
 		proxyURL := ""
-		ref, ok := c.ProxyPool.Acquire()
+		ref, ok := c.ProxyPool.Acquire(ctx)
 		if !ok {
 			if attemptedProxy {
 				if lastErr == nil {

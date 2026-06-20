@@ -63,3 +63,35 @@ func TestRunDaemonCancelsPeersOnError(t *testing.T) {
 		t.Fatal("peer loop was not cancelled after error")
 	}
 }
+
+// TestRunDaemonAbandonsStuckLoopAfterGrace is the regression guard for the
+// graceful-shutdown hang: a loop that ignores its context must NOT pin
+// runDaemon past shutdownGrace. This is the exact failure mode that made
+// systemd SIGKILL the service on stop.
+func TestRunDaemonAbandonsStuckLoopAfterGrace(t *testing.T) {
+	orig := shutdownGrace
+	shutdownGrace = 20 * time.Millisecond
+	defer func() { shutdownGrace = orig }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	stuck := func(context.Context) error {
+		<-release // intentionally ignores ctx
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runDaemon(ctx, stuck) }()
+
+	cancel() // request shutdown
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runDaemon err = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runDaemon did not abandon stuck loop within grace")
+	}
+	close(release) // let the leaked loop goroutine exit
+}

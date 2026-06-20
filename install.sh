@@ -42,6 +42,8 @@ sudo tee ${SERVICE_FILE} > /dev/null <<EOF
 [Unit]
 Description=115 Share Service
 After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -52,8 +54,7 @@ ExecStart=${INSTALL_DIR}/${BIN_NAME} -mode daemon -db ${DB_PATH} -bleve ${BLEVE_
 
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=5
+TimeoutStopSec=30
 
 # 提高文件句柄
 LimitNOFILE=1048576

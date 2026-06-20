@@ -254,7 +254,7 @@ type fakeProxyPool struct {
 	wins  []string
 }
 
-func (p *fakeProxyPool) Acquire() (ProxyRef, bool) {
+func (p *fakeProxyPool) Acquire(context.Context) (ProxyRef, bool) {
 	if len(p.refs) == 0 {
 		return ProxyRef{}, false
 	}
