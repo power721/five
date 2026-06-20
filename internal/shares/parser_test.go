@@ -66,6 +66,24 @@ func TestParseShareURLAllowsMissingPassword(t *testing.T) {
 	}
 }
 
+func TestParseTokenFormatWithPasswordAndName(t *testing.T) {
+	input := strings.NewReader("swznmd03nc7?password=p897 原盘|动漫原盘_40.49T\n")
+
+	out, err := Parse(input)
+	if err != nil {
+		t.Fatalf("parse token shares: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("shares = %d, want 1", len(out))
+	}
+	if out[0].ShareCode != "swznmd03nc7" || out[0].ReceiveCode != "p897" {
+		t.Fatalf("token share = %#v", out[0])
+	}
+	if out[0].Status != "ACTIVE" {
+		t.Fatalf("status = %q", out[0].Status)
+	}
+}
+
 func TestParseAcceptsShareURLsInFile(t *testing.T) {
 	input := strings.NewReader(`# either 4-column format or share URL
 https://115.com/s/swf01d43zby?password=echo
