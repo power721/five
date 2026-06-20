@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +19,14 @@ type fakeStore struct {
 	crawlShares    []model.Share
 	files          []model.File
 	events         []model.IndexEvent
+	shareCount     int
+	fileCount      int
+	eventCount     int
 	upsertedShares []model.Share
 	checkpoints    map[string]model.Checkpoint
+	listSharesErr  error
+	allFilesErr    error
+	eventsErr      error
 }
 
 func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
@@ -27,7 +34,14 @@ func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, e
 }
 
 func (f *fakeStore) ListShares(context.Context) ([]model.Share, error) {
+	if f.listSharesErr != nil {
+		return nil, f.listSharesErr
+	}
 	return f.shares, nil
+}
+
+func (f *fakeStore) CountShares(context.Context) (int, error) {
+	return f.shareCount, nil
 }
 
 func (f *fakeStore) UpsertShare(_ context.Context, share model.Share) error {
@@ -36,11 +50,25 @@ func (f *fakeStore) UpsertShare(_ context.Context, share model.Share) error {
 }
 
 func (f *fakeStore) AllFiles(context.Context) ([]model.File, error) {
+	if f.allFilesErr != nil {
+		return nil, f.allFilesErr
+	}
 	return f.files, nil
 }
 
+func (f *fakeStore) CountFiles(context.Context) (int, error) {
+	return f.fileCount, nil
+}
+
 func (f *fakeStore) PendingIndexEvents(context.Context, int) ([]model.IndexEvent, error) {
+	if f.eventsErr != nil {
+		return nil, f.eventsErr
+	}
 	return f.events, nil
+}
+
+func (f *fakeStore) CountPendingIndexEvents(context.Context) (int, error) {
+	return f.eventCount, nil
 }
 
 func (f *fakeStore) GetShare(_ context.Context, shareCode string) (model.Share, bool, error) {
@@ -59,18 +87,12 @@ func (f *fakeStore) LoadCheckpoint(_ context.Context, shareCode string) (model.C
 
 func TestStatusReturnsShareFileAndEventCounts(t *testing.T) {
 	store := &fakeStore{
-		shares: []model.Share{
-			{ShareCode: "sw1", Status: "ACTIVE"},
-			{ShareCode: "sw2", Status: "STALE"},
-		},
-		files: []model.File{
-			{FileID: "f1"},
-			{FileID: "f2"},
-			{FileID: "f3"},
-		},
-		events: []model.IndexEvent{
-			{ID: 1}, {ID: 2},
-		},
+		shareCount:    2,
+		fileCount:     3,
+		eventCount:    2,
+		listSharesErr: errors.New("status must not load shares"),
+		allFilesErr:   errors.New("status must not load files"),
+		eventsErr:     errors.New("status must not load events"),
 	}
 	srv := New(store, nil)
 

@@ -126,6 +126,62 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "pw1", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("upsert first share: %v", err)
+	}
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw2", ReceiveCode: "pw2", Status: "STALE"}); err != nil {
+		t.Fatalf("upsert second share: %v", err)
+	}
+	now := time.Now().Unix()
+	files := []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: now},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", CrawledAt: now},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Path: "/c.mkv", Ext: "mkv", CrawledAt: now},
+	}
+	if err := s.UpsertFiles(ctx, files); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+	pending, err := s.PendingIndexEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("pending events: %v", err)
+	}
+	if err := s.MarkIndexEventsProcessed(ctx, []int64{pending[0].ID}); err != nil {
+		t.Fatalf("mark first event processed: %v", err)
+	}
+
+	shareCount, err := s.CountShares(ctx)
+	if err != nil {
+		t.Fatalf("count shares: %v", err)
+	}
+	if shareCount != 2 {
+		t.Fatalf("share count = %d, want 2", shareCount)
+	}
+	fileCount, err := s.CountFiles(ctx)
+	if err != nil {
+		t.Fatalf("count files: %v", err)
+	}
+	if fileCount != 3 {
+		t.Fatalf("file count = %d, want 3", fileCount)
+	}
+	pendingCount, err := s.CountPendingIndexEvents(ctx)
+	if err != nil {
+		t.Fatalf("count pending index events: %v", err)
+	}
+	if pendingCount != 2 {
+		t.Fatalf("pending index events = %d, want 2", pendingCount)
+	}
+}
+
 func TestSQLiteShareSchemaDoesNotKeepRootFolderOrMountPath(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")

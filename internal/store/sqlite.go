@@ -132,6 +132,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			processed_at INTEGER
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_index_event_processed_id ON index_event(processed_at, id);`,
 		`CREATE TABLE IF NOT EXISTS index_manifest (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			version INTEGER NOT NULL,
@@ -264,6 +265,15 @@ func (s *Store) AllFiles(ctx context.Context) ([]model.File, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) CountFiles(ctx context.Context) (int, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM file`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) FileByID(ctx context.Context, fileID string) (model.File, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT file_id, share_code, parent_id, name, path, ext, size, is_dir, depth, sha1, COALESCE(updated_at, 0), crawled_at
 		FROM file WHERE file_id = ?`, fileID)
@@ -339,6 +349,15 @@ func (s *Store) PendingIndexEvents(ctx context.Context, limit int) ([]model.Inde
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) CountPendingIndexEvents(ctx context.Context) (int, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event WHERE processed_at IS NULL`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) MarkIndexEventsProcessed(ctx context.Context, ids []int64) error {
@@ -478,6 +497,15 @@ func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
 		shares = append(shares, share)
 	}
 	return shares, rows.Err()
+}
+
+func (s *Store) CountShares(ctx context.Context) (int, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM share`)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Share, error) {

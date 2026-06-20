@@ -15,11 +15,11 @@ import (
 )
 
 type Store interface {
-	ListSharesForCrawl(ctx context.Context, now int64) ([]model.Share, error)
 	ListShares(ctx context.Context) ([]model.Share, error)
+	CountShares(ctx context.Context) (int, error)
 	UpsertShare(ctx context.Context, share model.Share) error
-	AllFiles(ctx context.Context) ([]model.File, error)
-	PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error)
+	CountFiles(ctx context.Context) (int, error)
+	CountPendingIndexEvents(ctx context.Context) (int, error)
 	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 }
@@ -70,25 +70,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	shareList, err := s.store.ListShares(ctx)
+	shareCount, err := s.store.CountShares(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	files, err := s.store.AllFiles(ctx)
+	fileCount, err := s.store.CountFiles(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	events, err := s.store.PendingIndexEvents(ctx, 1_000_000)
+	pendingIndexEvents, err := s.store.CountPendingIndexEvents(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, StatusResponse{
-		ShareCount:         len(shareList),
-		FileCount:          len(files),
-		PendingIndexEvents: len(events),
+		ShareCount:         shareCount,
+		FileCount:          fileCount,
+		PendingIndexEvents: pendingIndexEvents,
 	})
 }
 

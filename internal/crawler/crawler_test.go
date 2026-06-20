@@ -377,6 +377,29 @@ func TestCrawlerPersistsShareMetadataOncePerCrawl(t *testing.T) {
 	}
 }
 
+func TestCrawlerMarksEmptyRootVisited(t *testing.T) {
+	c := New(&fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes:   nil,
+					HasMore: false,
+				},
+			},
+		},
+	}, &memoryStore{}, Config{PageSize: 100})
+
+	store := c.store.(*memoryStore)
+	share := model.Share{ShareCode: "empty", ReceiveCode: "echo"}
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl empty share: %v", err)
+	}
+
+	if !store.checkpoint.Visited["0"] {
+		t.Fatalf("final checkpoint visited = %#v, want root marked visited", store.checkpoint.Visited)
+	}
+}
+
 func TestCrawlerRetriesRetryablePageFailureInPlace(t *testing.T) {
 	lister := &fakeLister{
 		pages: map[string][]Page{

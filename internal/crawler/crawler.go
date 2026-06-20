@@ -139,6 +139,7 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 			}
 			if len(page.Nodes) == 0 && !page.HasMore {
 				log.Printf("event=crawl_page_fetched share=%s cid=%s offset=%d nodes=0 indexed=0 has_more=false", share.ShareCode, task.CID, offset)
+				visited[task.CID] = true
 				break
 			}
 			for i := range page.Nodes {
