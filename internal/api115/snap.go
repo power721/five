@@ -133,6 +133,7 @@ type Client struct {
 type CookieStore interface {
 	Load() string
 	Save(cookie string)
+	Clear()
 }
 
 type ProxyRef struct {
@@ -160,6 +161,7 @@ func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error
 	}
 	var lastErr error
 	attemptedProxy := false
+	prevProxyID := ""
 	for {
 		proxyID := ""
 		proxyURL := ""
@@ -176,6 +178,14 @@ func (c *Client) List(ctx context.Context, req ListRequest) (SnapResponse, error
 		attemptedProxy = true
 		proxyID = ref.ID
 		proxyURL = ref.URL
+		// Switching to a different proxy IP invalidates the session cookie that
+		// was bound to the previous IP; clear it so the next request reuses a
+		// clean session instead of tripping an IP/session mismatch.
+		if prevProxyID != "" && proxyID != prevProxyID {
+			log.Printf("event=proxy_switch prev=%s cur=%s share=%s cookies_cleared=true", prevProxyID, proxyID, req.ShareCode)
+			c.clearCookies()
+		}
+		prevProxyID = proxyID
 		log.Printf("event=proxy_request proxy=%s share=%s cid=%s offset=%d limit=%d", proxyID, req.ShareCode, req.CID, req.Offset, req.Limit)
 		resp, err := c.listOnce(ctx, req, proxyURL)
 		if err == nil {
@@ -256,9 +266,23 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 		return SnapResponse{}, err
 	}
 	if err := ClassifySnapError(out); err != nil {
+		if strings.Contains(err.Error(), "empty data with nonzero count") {
+			c.clearCookies()
+		}
 		return SnapResponse{}, err
 	}
 	return out, nil
+}
+
+// clearCookies wipes both the in-memory cookie and the persisted one so the
+// next request starts a fresh session. Called after a proxy IP switch (the old
+// session was bound to the previous IP) and when a snap response signals that
+// the current cookie has gone stale.
+func (c *Client) clearCookies() {
+	c.Cookie = ""
+	if c.CookieStore != nil {
+		c.CookieStore.Clear()
+	}
 }
 
 func (c *Client) httpClientForProxy(proxyURL string) (*http.Client, error) {

@@ -419,6 +419,11 @@ func (s *Store) SaveKV(ctx context.Context, key, value string) error {
 	return err
 }
 
+func (s *Store) DeleteKV(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM kv WHERE key = ?`, key)
+	return err
+}
+
 func (s *Store) UpsertShare(ctx context.Context, share model.Share) error {
 	if share.Status == "" {
 		share.Status = "ACTIVE"

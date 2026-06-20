@@ -1,7 +1,11 @@
 package api115
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -172,3 +176,92 @@ func TestSnapNodeDirectoryHasNoExt(t *testing.T) {
 		t.Fatalf("directory ext = %q, want empty", f.Ext)
 	}
 }
+
+// snapServer serves a 403 on the first hit (driving a proxy-failure retry) then
+// a valid snap response on every subsequent hit.
+func snapServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	var hits int32
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleSnap))
+	}))
+}
+
+func TestListClearsCookiesWhenProxySwitches(t *testing.T) {
+	server := snapServer(t)
+	defer server.Close()
+
+	jar := &fakeCookieStore{current: "stale-session"}
+	pool := &fakeProxyPool{refs: []ProxyRef{{ID: "proxy-a"}, {ID: "proxy-b"}}}
+
+	client := &Client{
+		BaseURL:     server.URL,
+		Cookie:      "base-cookie",
+		CookieStore: jar,
+		ProxyPool:   pool,
+	}
+
+	if _, err := client.List(context.Background(), ListRequest{ShareCode: "share", CID: "0", Limit: 1}); err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if !jar.cleared {
+		t.Fatal("expected cookies to be cleared after the proxy switched from proxy-a to proxy-b")
+	}
+}
+
+func TestListKeepsCookiesWhenProxyDoesNotSwitch(t *testing.T) {
+	server := snapServer(t)
+	defer server.Close()
+
+	jar := &fakeCookieStore{current: "session"}
+	// Same proxy served twice: the 403 triggers a retry, but the proxy ID is
+	// unchanged, so cookies must be preserved.
+	pool := &fakeProxyPool{refs: []ProxyRef{{ID: "proxy-a"}, {ID: "proxy-a"}}}
+
+	client := &Client{
+		BaseURL:     server.URL,
+		Cookie:      "base-cookie",
+		CookieStore: jar,
+		ProxyPool:   pool,
+	}
+
+	if _, err := client.List(context.Background(), ListRequest{ShareCode: "share", CID: "0", Limit: 1}); err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if jar.cleared {
+		t.Fatal("cookies must not be cleared when the proxy did not switch")
+	}
+}
+
+type fakeCookieStore struct {
+	current string
+	cleared bool
+	saved   []string
+}
+
+func (f *fakeCookieStore) Load() string       { return f.current }
+func (f *fakeCookieStore) Save(cookie string) { f.current = cookie; f.saved = append(f.saved, cookie) }
+func (f *fakeCookieStore) Clear()             { f.current = ""; f.cleared = true }
+
+type fakeProxyPool struct {
+	refs  []ProxyRef
+	fails []string
+	wins  []string
+}
+
+func (p *fakeProxyPool) Acquire() (ProxyRef, bool) {
+	if len(p.refs) == 0 {
+		return ProxyRef{}, false
+	}
+	r := p.refs[0]
+	p.refs = p.refs[1:]
+	return r, true
+}
+
+func (p *fakeProxyPool) RecordFailure(id string) { p.fails = append(p.fails, id) }
+func (p *fakeProxyPool) RecordSuccess(id string) { p.wins = append(p.wins, id) }

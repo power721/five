@@ -100,6 +100,10 @@ func (m *memoryCookieStore) Save(cookie string) {
 	m.saves++
 }
 
+func (m *memoryCookieStore) Clear() {
+	m.value = ""
+}
+
 func (p *proxyRecorder) Acquire() (ProxyRef, bool) {
 	if len(p.queue) == 0 {
 		return ProxyRef{}, false

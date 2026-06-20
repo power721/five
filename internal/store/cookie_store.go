@@ -31,3 +31,12 @@ func (c *CookieStore) Save(cookie string) {
 	}
 	_ = c.store.SaveKV(context.Background(), c.key, cookie)
 }
+
+// Clear drops the persisted cookie so the next request starts with a clean
+// session — used after switching proxy IP to avoid an IP/session mismatch.
+func (c *CookieStore) Clear() {
+	if c == nil || c.store == nil {
+		return
+	}
+	_ = c.store.DeleteKV(context.Background(), c.key)
+}
