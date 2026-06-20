@@ -53,9 +53,6 @@ func New(cfg Config) *Manager {
 	if cfg.FailureThreshold <= 0 {
 		cfg.FailureThreshold = 3
 	}
-	if cfg.FatalThreshold <= 0 {
-		cfg.FatalThreshold = 5
-	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -105,7 +102,7 @@ func (m *Manager) RecordFailure(id string) {
 	m.current.State = StateBlocked
 	m.current = nil
 	m.consecutiveReplacements++
-	if m.consecutiveReplacements >= m.cfg.FatalThreshold {
+	if m.cfg.FatalThreshold > 0 && m.consecutiveReplacements >= m.cfg.FatalThreshold {
 		m.fatalErr = ErrProxyFatal
 		log.Printf("event=proxy_fatal consecutive_replacements=%d threshold=%d", m.consecutiveReplacements, m.cfg.FatalThreshold)
 	}

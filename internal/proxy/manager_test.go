@@ -192,6 +192,44 @@ func TestManagerTripsFatalAfterFiveConsecutiveReplacements(t *testing.T) {
 	}
 }
 
+func TestManagerDefaultDoesNotTripFatalAfterConsecutiveReplacements(t *testing.T) {
+	now := time.Date(2026, 6, 18, 21, 40, 0, 0, time.UTC)
+	mgr := New(Config{
+		FailureThreshold: 1,
+		Now:              func() time.Time { return now },
+	})
+
+	for i := 0; i < 10; i++ {
+		id := string(rune('a' + i))
+		mgr.current = &Proxy{
+			ID:       id,
+			URL:      "http://" + id,
+			State:    StateActive,
+			Deadline: now.Add(3 * time.Minute),
+		}
+		mgr.RecordFailure(id)
+	}
+
+	provider := &staticProvider{
+		proxy: Proxy{
+			ID:       "fresh",
+			URL:      "http://fresh",
+			State:    StateActive,
+			Deadline: now.Add(3 * time.Minute),
+		},
+	}
+	ref, ok := mgr.Acquire(context.Background(), provider, nil)
+	if !ok {
+		t.Fatal("default manager should keep fetching proxies after replacement streaks")
+	}
+	if ref.ID != "fresh" {
+		t.Fatalf("acquired proxy = %#v, want fresh", ref)
+	}
+	if mgr.FatalError() != nil {
+		t.Fatalf("fatal err = %v, want nil", mgr.FatalError())
+	}
+}
+
 func TestManagerLogsProxyFatalThreshold(t *testing.T) {
 	var logs bytes.Buffer
 	prevWriter := log.Writer()

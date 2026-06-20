@@ -123,7 +123,7 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				if err == nil {
 					break
 				}
-				if !api115.IsRetryable(err) || attempt == c.cfg.RetryCount {
+				if !isPageRetryable(err) || attempt == c.cfg.RetryCount {
 					log.Printf("event=crawl_page_failed share=%s cid=%s offset=%d error=%q", share.ShareCode, task.CID, offset, err.Error())
 					return err
 				}
@@ -227,6 +227,10 @@ func filterIndexableFiles(files []model.File) []model.File {
 		}
 	}
 	return out
+}
+
+func isPageRetryable(err error) bool {
+	return api115.IsRetryable(err) || api115.IsProxyFailure(err)
 }
 
 func isIndexableMediaExt(ext string) bool {

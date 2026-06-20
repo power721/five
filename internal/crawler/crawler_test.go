@@ -439,3 +439,43 @@ func TestCrawlerRetriesRetryablePageFailureInPlace(t *testing.T) {
 		t.Fatalf("list page calls = %#v, want 2 calls on same page", lister.calls)
 	}
 }
+
+func TestCrawlerRetriesProxyFailureInPlace(t *testing.T) {
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}
+	store := &memoryStore{}
+	c := New(lister, store, Config{PageSize: 100, RetryCount: 2})
+	share := model.Share{
+		ShareCode:   "swf01d43zby",
+		ReceiveCode: "echo",
+	}
+
+	var first bool
+	lister.hook = func(share model.Share, cid string, offset, limit int) (Page, error, bool) {
+		if !first {
+			first = true
+			return Page{}, api115.WrapError(api115.KindProxyFailure, "proxy pool exhausted", 0, nil), true
+		}
+		return Page{}, nil, false
+	}
+
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share with proxy retry: %v", err)
+	}
+	if len(store.files) != 1 {
+		t.Fatalf("stored files = %d, want 1", len(store.files))
+	}
+	if len(lister.calls) != 2 {
+		t.Fatalf("list page calls = %#v, want 2 calls on same page", lister.calls)
+	}
+}

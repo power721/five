@@ -227,3 +227,62 @@ func TestRunEventLoopStopsWithContext(t *testing.T) {
 		t.Fatal("expected event loop to poll pending events at least once")
 	}
 }
+
+func TestRunEventLoopDrainsBacklogBeforeSleeping(t *testing.T) {
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := &loopingEventProvider{
+		eventProvider: eventProvider{
+			files: map[string]model.File{
+				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+				"f2": {FileID: "f2", ShareCode: "sw1", Name: "B.mkv", Path: "/B.mkv", Ext: "mkv"},
+				"f3": {FileID: "f3", ShareCode: "sw1", Name: "C.mkv", Path: "/C.mkv", Ext: "mkv"},
+			},
+			events: []model.IndexEvent{
+				{ID: 1, FileID: "f1", Op: "upsert"},
+				{ID: 2, FileID: "f2", Op: "upsert"},
+				{ID: 3, FileID: "f3", Op: "upsert"},
+			},
+		},
+		calls: &atomic.Int32{},
+	}
+	manifest, err := builder.Rebuild(context.Background(), staticProvider{}, 1, 1)
+	if err != nil {
+		t.Fatalf("initial rebuild: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- builder.RunEventLoop(ctx, manifest.IndexPath, provider, 1, time.Hour)
+	}()
+
+	deadline := time.After(200 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(provider.events) == 0 {
+			cancel()
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			t.Fatalf("pending events were not drained before sleep; remaining=%d calls=%d", len(provider.events), provider.calls.Load())
+		case <-ticker.C:
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run event loop err: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("event loop did not stop after backlog drain")
+	}
+	if provider.calls.Load() < 3 {
+		t.Fatalf("pending event polls = %d, want at least 3", provider.calls.Load())
+	}
+}

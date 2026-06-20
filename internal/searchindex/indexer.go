@@ -3,6 +3,7 @@ package searchindex
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -107,20 +108,25 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 }
 
 func (b *Builder) ApplyPendingEvents(ctx context.Context, indexPath string, provider EventProvider, limit int) error {
+	_, err := b.applyPendingEvents(ctx, indexPath, provider, limit)
+	return err
+}
+
+func (b *Builder) applyPendingEvents(ctx context.Context, indexPath string, provider EventProvider, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	events, err := provider.PendingIndexEvents(ctx, limit)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(events) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	index, err := bleve.Open(indexPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	closed := false
 	defer func() {
@@ -136,7 +142,7 @@ func (b *Builder) ApplyPendingEvents(ctx context.Context, indexPath string, prov
 		case "upsert":
 			file, ok, err := provider.FileByID(ctx, event.FileID)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			if !ok {
 				continue
@@ -150,22 +156,24 @@ func (b *Builder) ApplyPendingEvents(ctx context.Context, indexPath string, prov
 				IsDir:     file.IsDir,
 				Depth:     file.Depth,
 			}); err != nil {
-				return err
+				return 0, err
 			}
 			processed = append(processed, event.ID)
 		}
 	}
 	if err := index.Batch(batch); err != nil {
-		return err
+		return 0, err
 	}
 	if err := index.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	closed = true
 	if len(processed) > 0 {
-		return provider.MarkIndexEventsProcessed(ctx, processed)
+		if err := provider.MarkIndexEventsProcessed(ctx, processed); err != nil {
+			return 0, err
+		}
 	}
-	return nil
+	return len(processed), nil
 }
 
 func buildMapping() mapping.IndexMapping {
@@ -202,8 +210,13 @@ func (b *Builder) RunEventLoop(ctx context.Context, indexPath string, provider E
 	defer ticker.Stop()
 
 	for {
-		if err := b.ApplyPendingEvents(ctx, indexPath, provider, limit); err != nil {
+		processed, err := b.applyPendingEvents(ctx, indexPath, provider, limit)
+		if err != nil {
 			return err
+		}
+		if processed > 0 {
+			log.Printf("event=index_events_applied count=%d", processed)
+			continue
 		}
 		select {
 		case <-ctx.Done():
