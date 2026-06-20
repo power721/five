@@ -30,6 +30,14 @@ type Builder struct {
 	rootDir string
 }
 
+// eventRetryBackoff / eventRetryMaxBackoff bound the retry delay when the event
+// loop hits a transient error (e.g. a momentarily locked DB). Package-level vars
+// (not consts) so tests can shrink them.
+var (
+	eventRetryBackoff    = time.Second
+	eventRetryMaxBackoff = time.Minute
+)
+
 type searchDoc struct {
 	FileID    string `json:"file_id"`
 	ShareCode string `json:"share_code"`
@@ -213,11 +221,31 @@ func (b *Builder) RunEventLoop(ctx context.Context, indexPath string, provider E
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	backoff := eventRetryBackoff
 	for {
 		processed, err := b.applyInto(ctx, index, provider, limit)
 		if err != nil {
-			return err
+			// A transient failure (e.g. a momentarily locked DB) must not take
+			// the whole daemon down via the runDaemon error path. Log, back off,
+			// and retry; only a cancelled context ends the loop.
+			if ctx.Err() != nil {
+				return nil
+			}
+			log.Printf("event=index_events_error err=%q backoff=%s", err.Error(), backoff)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
+			if backoff < eventRetryMaxBackoff {
+				backoff *= 2
+				if backoff > eventRetryMaxBackoff {
+					backoff = eventRetryMaxBackoff
+				}
+			}
+			continue
 		}
+		backoff = eventRetryBackoff
 		if processed > 0 {
 			log.Printf("event=index_events_applied count=%d", processed)
 			continue

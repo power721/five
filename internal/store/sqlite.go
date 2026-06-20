@@ -26,6 +26,13 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Serialize all access through a single connection. SQLite allows only one
+	// writer; with multiple pooled connections the crawler and indexer compete
+	// for the write lock and lose with "database is locked (SQLITE_BUSY)", which
+	// used to crash the daemon. One connection makes database/sql queue access
+	// instead, eliminating cross-connection BUSY. Every Query fully drains+closes
+	// its rows and no transaction issues a second db call, so this can't deadlock.
+	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.execPragmas(ctx); err != nil {
 		db.Close()

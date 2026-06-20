@@ -2,6 +2,7 @@ package searchindex
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -284,5 +285,76 @@ func TestRunEventLoopDrainsBacklogBeforeSleeping(t *testing.T) {
 	}
 	if provider.calls.Load() < 3 {
 		t.Fatalf("pending event polls = %d, want at least 3", provider.calls.Load())
+	}
+}
+
+// flakyProvider fails PendingIndexEvents a fixed number of times before
+// succeeding, simulating a transient store error such as SQLITE_BUSY.
+type flakyProvider struct {
+	eventProvider
+	remainingFailures *atomic.Int32
+}
+
+func (f *flakyProvider) PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error) {
+	if f.remainingFailures.Load() > 0 {
+		f.remainingFailures.Add(-1)
+		return nil, errors.New("database is locked (5) (SQLITE_BUSY)")
+	}
+	return f.eventProvider.PendingIndexEvents(ctx, limit)
+}
+
+func TestRunEventLoopRetriesTransientErrors(t *testing.T) {
+	prevBackoff, prevMax := eventRetryBackoff, eventRetryMaxBackoff
+	eventRetryBackoff, eventRetryMaxBackoff = time.Millisecond, 5*time.Millisecond
+	defer func() { eventRetryBackoff, eventRetryMaxBackoff = prevBackoff, prevMax }()
+
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := &flakyProvider{
+		eventProvider: eventProvider{
+			files: map[string]model.File{
+				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+			},
+			events: []model.IndexEvent{{ID: 1, FileID: "f1", Op: "upsert"}},
+		},
+		remainingFailures: &atomic.Int32{},
+	}
+	provider.remainingFailures.Store(3)
+
+	manifest, err := builder.Rebuild(context.Background(), staticProvider{}, 1, 1)
+	if err != nil {
+		t.Fatalf("initial rebuild: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- builder.RunEventLoop(ctx, manifest.IndexPath, provider, 10, time.Hour)
+	}()
+
+	// The loop must survive the transient PendingIndexEvents failures and
+	// eventually drain the backlog instead of returning the error.
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for len(provider.events) > 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("event loop exited early with err=%v before draining (remaining failures=%d)", err, provider.remainingFailures.Load())
+		case <-deadline:
+			t.Fatalf("event loop did not drain backlog after transient errors; remaining=%d", len(provider.events))
+		case <-ticker.C:
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run event loop err: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event loop did not stop after backlog drain")
 	}
 }
