@@ -106,3 +106,20 @@ journalctl -u five -f
 sqlite3 /opt/five/data/index.db
 
 ```
+
+## Distribute the index
+
+Package a self-contained index for downstream consumers (alist-tvbox / PowerList):
+
+```bash
+go run ./cmd/115-indexer -mode export-db -db data/index.db -bleve data/bleve -out 115.index.zip
+```
+
+`115.index.zip` contains a trimmed `index.db` (only `file` and `share` tables)
+and the READY bleve index under `bleve/`. It extracts to `index.db` + `bleve/`.
+
+Manual publish to 115:
+
+1. Upload `115.index.zip` to the publishing 115 account and create a share.
+2. Overwrite the version pointer (`https://d.example.com/115.version.txt`) with one
+   line `shareCode:receiveCode` (e.g. `swf01d43zby:6666`).
