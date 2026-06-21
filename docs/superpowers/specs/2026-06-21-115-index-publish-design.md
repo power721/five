@@ -53,8 +53,8 @@ publisher (manual)
 alist-tvbox  Index115Service
   -> GET 115.version.txt, parse shareCode:receiveCode
   -> compare stored shareCode; skip if equal
-  -> mount Pan115Share, AList copy zip into Pan115:/alist-tvbox-temp
-  -> download to local temp, delete from 115
+  -> mount + enable Pan115Share, download zip via AList
+     (Pan115Share driver auto-转存 into /alist-tvbox-temp, auto-deletes after)
   -> extract to /data/index115 (atomic swap), persist shareCode
 
 PowerList
@@ -134,27 +134,28 @@ Documented in `README.md`. Deliberately manual — no automation in `five`.
 1. Fetch `https://d.example.com/115.version.txt` (existing RestTemplate pattern),
    trim, split on `:` into `shareCode` / `receiveCode`; require both non-empty.
 2. If equal to stored `index115.share_code` -> complete task "up to date", return.
-3. Register the published share as a **`Pan115Share`** storage mount (reuse the
-   `ShareService` / `DriverAccountService` storage-registration pattern).
-4. AList cross-storage **copy** (`/api/fs/copy`) of `115.index.zip` from the
-   share mount into the user's own **`Pan115`** mount at `/alist-tvbox-temp/`.
-5. **Download** `/alist-tvbox-temp/115.index.zip` to a local temp file via
-   `AListLocalService` streaming.
-6. **Delete** `/alist-tvbox-temp/115.index.zip` via AList `/api/fs/remove`.
-7. Extract the zip to `/data/index115.new`, then atomic swap:
+3. Register + enable the published share as a **`Pan115Share`** storage mount
+   (reuse the `ShareService` / `DriverAccountService` registration +
+   `ShareService.enableStorage` pattern).
+4. **Download** `115.index.zip` to a local temp file via the bundled AList
+   download path. The `Pan115Share` driver auto-**转存** (transfers) the file
+   into the user's 115 at `/alist-tvbox-temp` to produce a direct link, and
+   auto-**deletes** it afterward — no manual copy/delete step in the service.
+5. Extract the zip to `/data/index115.new`, then atomic swap:
    `/data/index115` -> `/data/index115.old`, `/data/index115.new` ->
    `/data/index115`, remove `/data/index115.old`.
-8. Persist `index115.share_code = shareCode`; complete the task.
+6. Persist `index115.share_code = shareCode`; complete the task.
 
-Reuses `Pan115Share` + `Pan115` drivers and the bundled AList fs/admin APIs. No
-new 115 wire protocol is written.
+Reuses `Pan115Share` and the bundled AList storage/download APIs. No new 115 wire
+protocol is written; transfer + cleanup are driver-internal.
 
 ### Assumptions
 
-- The bundled AList has the user's own 115 storage registered (`Pan115`) with
-  `/alist-tvbox-temp` present.
-- `AListLocalService` exposes (or will be augmented with) copy / download /
-  remove / storage-registration helpers; exact method wiring is a plan detail.
+- The `Pan115Share` driver is configured (via the underlying 115 account) to
+  auto-transfer into `/alist-tvbox-temp` and delete after link resolution.
+- `AListLocalService.saveStorage` + `ShareService.enableStorage` register/enable
+  the mount; a download-to-local helper (reusing `FileDownloader` / `IndexService`
+  streaming over the AList download path) fetches the file.
 - `/data/index115` is the container path PowerList reads (host volume mapping is
   a deployment concern).
 
@@ -163,8 +164,9 @@ new 115 wire protocol is written.
 - **five:** trim or zip failure, or no resolvable Bleve source -> `log.Fatalf`
   with a clear message. Temp dir cleaned via defer.
 - **alist-tvbox:** any failure fails the task with a message and leaves the
-  existing `/data/index115` intact. Cleanup best-effort: remove the partial file
-  from `/alist-tvbox-temp`, remove the local temp, remove `/data/index115.new`.
+  existing `/data/index115` intact. Cleanup best-effort: remove the local temp
+  and `/data/index115.new`. A transfer the driver did not auto-delete (e.g. a
+  mid-download abort) is tolerated/idempotent in `/alist-tvbox-temp`.
   Skip-on-equal is success, not an error.
 
 ## Testing
@@ -188,7 +190,8 @@ new 115 wire protocol is written.
 
 1. **Bleve version skew:** `five` builds on `bleve/v2 v2.6.0`; PowerList opens
    on `v2.5.2`. Confirmed working today; treat as a checkpoint, do not pin.
-2. **AList helper coverage:** confirm `AListLocalService` (or augment it) covers
-   cross-storage copy, file download, remove, and temporary storage mount.
+2. **AList helper coverage:** confirm storage enable (`ShareService.enableStorage`)
+   + a download-to-local path over the AList download endpoint; add a helper if
+   none exists.
 3. **Auth:** confirm `/api/index115/update` sits behind the existing admin auth
    filter like other admin endpoints.
