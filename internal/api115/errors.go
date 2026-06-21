@@ -103,15 +103,30 @@ func ClassifyRequestError(cause error) error {
 	return WrapError(KindRetryable, "115 request failed", 0, cause)
 }
 
+// isDeadShareMessage reports whether a 115 snap error text describes a share
+// that is permanently unusable (cancelled, deleted, or needs a receive code we
+// do not have). Such shares must never be retried. 115 returns these messages
+// in Chinese; the English phrases are retained as a fallback.
+func isDeadShareMessage(msg string) bool {
+	switch {
+	case strings.Contains(msg, "receive code"),
+		strings.Contains(msg, "share not found"),
+		strings.Contains(msg, "share has been cancelled"),
+		strings.Contains(msg, "已取消"),
+		strings.Contains(msg, "不存在"),
+		strings.Contains(msg, "提取码"):
+		return true
+	}
+	return false
+}
+
 func ClassifySnapError(resp SnapResponse) error {
 	if !resp.State {
 		msg := strings.ToLower(resp.Error)
-		switch {
-		case strings.Contains(msg, "receive code"), strings.Contains(msg, "share not found"), strings.Contains(msg, "share has been cancelled"):
+		if isDeadShareMessage(msg) {
 			return WrapError(KindDeadShare, resp.Error, 0, nil)
-		default:
-			return WrapError(KindRetryable, resp.Error, 0, nil)
 		}
+		return WrapError(KindRetryable, resp.Error, 0, nil)
 	}
 	if !resp.ValidShare() {
 		return WrapError(KindDeadShare, "share state invalid", 0, nil)

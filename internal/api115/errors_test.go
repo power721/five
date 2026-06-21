@@ -67,6 +67,23 @@ func TestClassifySnapResponseErrors(t *testing.T) {
 	}
 }
 
+// 115 returns share-lifecycle errors in Chinese. A cancelled/missing share is
+// permanent, so it must be DEAD (never retried), not RETRYABLE.
+func TestClassifySnapErrorMarksChineseDeadShareMessages(t *testing.T) {
+	cases := []string{
+		"分享已取消",   // share has been cancelled (confirmed from production logs)
+		"分享不存在",   // share not found
+		"提取码错误",   // wrong receive code
+	}
+	for _, msg := range cases {
+		resp := SnapResponse{State: false, Error: msg}
+		err := ClassifySnapError(resp)
+		if !IsDeadShare(err) {
+			t.Fatalf("115 dead-share message %q should be DEAD, got %v", msg, err)
+		}
+	}
+}
+
 func TestClassifiedErrorSupportsErrorsIs(t *testing.T) {
 	err := WrapError(KindProxyFailure, "proxy blocked", http.StatusForbidden, nil)
 	if !errors.Is(err, ErrProxyFailure) {
