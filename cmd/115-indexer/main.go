@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"five/internal/adminhttp"
@@ -321,14 +322,34 @@ func main() {
 		if *outPath == "" {
 			log.Fatal("export-db mode requires -out")
 		}
-		if err := s.ExportSnapshot(ctx, *outPath); err != nil {
-			log.Fatalf("export snapshot: %v", err)
+		manifest, ok, err := s.LoadManifest(ctx)
+		if err != nil {
+			log.Fatalf("load manifest: %v", err)
 		}
-		msg := fmt.Sprintf("exported self-contained snapshot to %s", *outPath)
-		if manifest, ok, err := s.LoadManifest(ctx); err == nil && ok {
-			msg += fmt.Sprintf("; package the READY bleve index alongside it: %s", manifest.IndexPath)
+		var bleveSrc string
+		switch {
+		case ok && manifest.Status == "READY":
+			bleveSrc = manifest.IndexPath
+		default:
+			bleveSrc = newestBleveIndex(*blevePath)
+			if bleveSrc == "" {
+				log.Fatal("no READY bleve index; run rebuild-index first")
+			}
+			log.Printf("warning: no READY manifest; using bleve index %s", bleveSrc)
 		}
-		fmt.Fprintln(os.Stdout, msg)
+		tmp, err := os.MkdirTemp("", "five-export-")
+		if err != nil {
+			log.Fatalf("temp dir: %v", err)
+		}
+		defer os.RemoveAll(tmp)
+		trimmedDB := filepath.Join(tmp, "index.db")
+		if err := s.ExportTrimmed(ctx, trimmedDB); err != nil {
+			log.Fatalf("export trimmed: %v", err)
+		}
+		if err := buildPackage(trimmedDB, bleveSrc, *outPath); err != nil {
+			log.Fatalf("build package: %v", err)
+		}
+		fmt.Fprintf(os.Stdout, "packaged index to %s (db trimmed to file+share; bleve from %s)\n", *outPath, bleveSrc)
 	default:
 		log.Fatalf("unsupported mode %q", *mode)
 	}
