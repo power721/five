@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -660,5 +661,83 @@ func TestSQLiteStoreMigrationAddsShareMetaColumnsToExistingDB(t *testing.T) {
 	got, _, _ = s.GetShare(ctx, "sw1")
 	if got.ShareTitle != "T" || got.FileSize != 7 {
 		t.Fatalf("post-migrate update failed: %#v", got)
+	}
+}
+
+func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "rc1"}); err != nil {
+		t.Fatalf("upsert share: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+	// Populate the tables that must be dropped.
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code,cid,next_offset,active_path,active_depth,queue_json,visited_json,updated_at) VALUES('sw1','0',0,'',0,'[]','{}',1)`); err != nil {
+		t.Fatalf("insert checkpoint: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id,op,created_at) VALUES('f1','upsert',1)`); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if err := s.UpdateManifest(ctx, model.IndexManifest{Version: 1, IndexPath: "x", Status: "READY", BuiltAt: 1, FileCount: 1}); err != nil {
+		t.Fatalf("update manifest: %v", err)
+	}
+	if err := s.SaveKV(ctx, "k", "v"); err != nil {
+		t.Fatalf("save kv: %v", err)
+	}
+
+	trimmed := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, trimmed); err != nil {
+		t.Fatalf("export trimmed: %v", err)
+	}
+	s.Close()
+
+	// Prove self-containment: copy only the .db (no sidecars) to a fresh path.
+	data, err := os.ReadFile(trimmed)
+	if err != nil {
+		t.Fatalf("read trimmed: %v", err)
+	}
+	isolated := filepath.Join(t.TempDir(), "isolated.db")
+	if err := os.WriteFile(isolated, data, 0o644); err != nil {
+		t.Fatalf("write isolated: %v", err)
+	}
+	db, err := sql.Open("sqlite", isolated)
+	if err != nil {
+		t.Fatalf("open isolated: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		t.Fatalf("query tables: %v", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var n string
+		rows.Scan(&n)
+		tables = append(tables, n)
+	}
+	rows.Close()
+	if got := strings.Join(tables, ","); got != "file,share" {
+		t.Fatalf("tables = %q, want file,share", got)
+	}
+
+	var files, shares int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM file").Scan(&files)
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM share").Scan(&shares)
+	if files != 1 || shares != 1 {
+		t.Fatalf("counts files=%d shares=%d, want 1/1", files, shares)
+	}
+
+	var idx int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file' AND name LIKE 'idx_file_%'").Scan(&idx)
+	if idx != 5 {
+		t.Fatalf("file indexes = %d, want 5", idx)
 	}
 }

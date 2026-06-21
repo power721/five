@@ -72,6 +72,51 @@ func (s *Store) ExportSnapshot(ctx context.Context, destPath string) error {
 	return nil
 }
 
+// ExportTrimmed writes a single-file copy of the database containing only the
+// file and share tables (with their indexes), for shipping to consumers.
+// Crawler/indexer internals (checkpoints, events, manifest, kv) are excluded.
+// destPath is overwritten if it exists; the result has no -wal/-shm sidecar.
+func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
+	if dir := filepath.Dir(destPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	quoted := "'" + strings.ReplaceAll(destPath, "'", "''") + "'"
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO "+quoted); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", destPath, err)
+	}
+	db, err := sql.Open("sqlite", destPath)
+	if err != nil {
+		return fmt.Errorf("open trimmed: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	// DELETE journal so the subsequent VACUUM produces a sidecar-free file.
+	for _, pragma := range []string{"PRAGMA journal_mode=DELETE;", "PRAGMA synchronous=NORMAL;"} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("pragma %q: %w", pragma, err)
+		}
+	}
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS crawl_checkpoint;`,
+		`DROP TABLE IF EXISTS index_event;`,
+		`DROP TABLE IF EXISTS index_manifest;`,
+		`DROP TABLE IF EXISTS kv;`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("trim %q: %w", stmt, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "VACUUM;"); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) execPragmas(ctx context.Context) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL;",
