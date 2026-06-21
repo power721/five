@@ -2,106 +2,120 @@
 
 ## Goal
 
-Let the TVBox end user browse and search the 115 index through alist-tvbox, by
-treating PowerList as a version-1 `Site` whose browse/search route to its
-`/index115` API while playback uses its AList-compatible `/api/fs/get`.
+Let the TVBox end user browse, search, and play the 115 index through
+alist-tvbox, by treating PowerList as a version-1 `Site` whose browse/search/play
+route to PowerList's `/index115` API.
 
 ## Background
 
-PowerList (OpenList-based) serves `/index115/browse`, `/index115/search`,
-`/index115/link` (auth-gated, under `auth.Group("/index115")`). It also serves the
-standard AList API (`/api/fs/get`, etc.) because it is an AList fork. alist-tvbox
-already downloads the index to `/data/index115` (see
-`2026-06-21-115-index-publish-design.md`).
+PowerList (OpenList-based) serves (auth-gated):
+- `GET /index115/browse?share_code=&receive_code=&parent_id=` → `[]FileItem`.
+  Empty `share_code` lists all shares (root); else lists children of
+  `share_code` + `parent_id` (default `"0"`).
+- `GET /index115/search?q=&page=&per_page=&share_code=` → `{query,total,items:[]FileItem}`.
+- `POST /index115/link` body `{cookie, share_code, receive_code, file_id}` → `{url, expired_in}`.
+
+`FileItem` carries `FileID, ShareCode, ReceiveCode, Name, Path, Size, IsDir, Ext`.
+alist-tvbox already downloads the index to `/data/index115`.
 
 ## Scope
 
 Owns:
-- An `Index115Client` that calls PowerList `/index115/browse` and `/index115/search`.
-- Branching `AListService.listFiles` and `AListService.search` to the client when
-  `site.getStorageVersion() == 1`.
-- Seeding an `index115` Site (version 1, url `http://localhost`, searchable) with
-  the shared AList token.
+- An `Index115Client` calling PowerList `/index115/browse|search|link`.
+- Version-1 branches in `TvBoxService.getMovieList`, `getPlayUrl`, `searchByApi`.
+- An identity-encoding scheme threaded through the existing `proxyService`.
+- Seeding the `index115` Site (version 1) with the shared AList token.
 
 Does NOT own:
-- Playback wiring — PowerList plays via the unchanged AList path (`/api/fs/get`).
-- The PowerList `/index115` API itself (already implemented in PowerList).
-- Index download (already built: `Index115Service`).
+- The PowerList `/index115` API (already implemented).
+- Index download (already built).
 
 ## Design
 
 ### Discriminator
 
-`site.getStorageVersion() == 1` marks a PowerList/index115 backend. AList sites
-use 2 or 3. `AListService.getVersion` already short-circuits
-(`if storageVersion != null return it`), so it returns 1 without probing
-`/api/public/settings` — no change needed there.
+`site.getStorageVersion() == 1`. `AListService.getVersion` short-circuits on
+non-null `storageVersion`, so it returns 1 without probing — but version-1 sites
+never reach `AListService` anyway (the `TvBoxService` branches intercept first).
+
+### Why `TvBoxService` branches (not `AListService`)
+
+`getMovieList` builds each child's `vod_id` from
+`proxyService.generatePath(site, parentPath + "/" + fsInfo.getName())`, and
+`FsInfo` has only `name` (no path/id field). So the index115 identity
+(`shareCode`/`receiveCode`/`fileID`) would be lost in the generic path build.
+Branching in `TvBoxService` lets us encode the identity into the path that
+`proxyService` stores and recover it on drill-in/play.
+
+### Identity encoding
+
+Path form: `/idx/<shareCode>:<receiveCode>/<id>` where `id` is a `parentID`
+(browse) or `fileID` (play); root is `/`. These path strings are registered via
+`proxyService.generatePath(site, path)` (which stores arbitrary `(site,path)→int`,
+`int→path` in the `PlayUrl` table) exactly like any other site. `receive_code`
+in the path is consistent with how share passwords already flow through TVBox
+paths.
 
 ### `Index115Client` (new, mirrors `AListService`)
 
-- `browse(Site site, String path, int page, int size) -> FsResponse` —
-  `GET {site.url}/index115/browse` with `Authorization: {site.getToken()}`,
-  maps the response JSON to a `FsInfo` list so `TvBoxService` reuses the existing
-  `FsInfo -> MovieDetail` conversion.
-- `search(Site site, String keyword) -> List<SearchResult>` —
-  `GET {site.url}/index115/search`, mapped to `SearchResult`.
+Same `RestTemplateBuilder`/header pattern; `Authorization: site.getToken()`.
+- `browse(Site, shareCode, receiveCode, parentID) -> List<Index115File>` — `GET {url}/index115/browse`.
+- `search(Site, query, page, perPage) -> Index115SearchResult` — `GET {url}/index115/search`.
+- `resolveLink(Site, cookie, shareCode, receiveCode, fileID) -> String url` — `POST {url}/index115/link`.
 
-Built with the same `RestTemplateBuilder`/header pattern as `AListService`.
+`Index115File` mirrors PowerList's `FileItem`.
 
-### `AListService` branches (two only)
+### `TvBoxService` branches (version-1)
 
-- `listFiles`: after `int version = getVersion(site);`, add
-  `if (version == 1) return index115Client.browse(site, path, page, size);`
-  before the existing `/api/fs/list` logic.
-- `search`: at the top, add
-  `if (site.getStorageVersion() != null && site.getStorageVersion() == 1) return index115Client.search(site, keyword);`
-
-`getFile`/playback, rename, move, remove, etc. are untouched — they already work
-against PowerList's AList-compatible endpoints. Every `TvBoxService` call site
-(root category list, drill-in, `dfs`, subtitles, `searchByApi`) inherits the
-switch automatically because it goes through these two methods.
+- `getMovieList`: decode `path` (root `/` → shares; `/idx/<sc>:<rc>` → share root
+  `parent_id="0"`; `/idx/<sc>:<rc>/<parent>` → children). For each `FileItem`,
+  `vod_name` = display name, `vod_id` = `siteId + "$" + proxyService.generatePath(site, encodedChildPath) + "$1"`.
+- `getPlayUrl`: decode `path` → `(shareCode, receiveCode, fileID)`; call
+  `index115Client.resolveLink(...)`. The cookie is the master Pan115 account's
+  (`driverAccountRepository.findByTypeAndMasterTrue(DriverType.PAN115)`).
+  Return `{parse:0, url, type: PAN115, header:{User-Agent, Referer:115.com}}`.
+- `searchByApi`: `index115Client.search(...)` → `MovieDetail`s with `vod_id` from
+  encoded child paths.
 
 ### Site seed
 
-An idempotent startup seed (e.g. `ApplicationRunner`) creates, if absent, a Site:
-`name = "index115"`, `storageVersion = 1`, `url = "http://localhost"`,
-`searchable = true`, `token = <current AList token>`. The token is read the same
-way site id=1 gets it (`SiteService`'s shared `aListToken` / the `alist_token`
-setting); `SiteService.resetToken` already re-syncs every site carrying that
-token, so rotation is handled. The site auto-appears as a TVBox category via
-`getCategoryList`.
+Idempotent startup seed creates, if absent, a Site `name="index115"`,
+`storageVersion=1`, `url="http://localhost"`, `searchable=true`,
+`token=<shared AList token>` (read from the `alist_token` setting; `resetToken`
+keeps it in sync). Auto-appears as a TVBox category.
 
 ### Data flow
 
 ```
 TVBox -> /vod/{token} -> TvBoxController -> TvBoxService
-  category list / drill-in -> AListService.listFiles(site,...)
-                                version==1 ? Index115Client.browse -> /index115/browse
-                                           : AList /api/fs/list
-  search               -> AListService.search(site,...)
-                                version==1 ? Index115Client.search -> /index115/search
-                                           : AList /api/fs/search
-  play                 -> AListService.getFile -> http://localhost/api/fs/get  (unchanged)
+  category list  -> getCategoryList: version-1 site auto-listed (root "/")
+  drill-in       -> getMovieList: version==1 ? Index115Client.browse (decode path)
+                                          : AListService.listFiles
+  search         -> searchByApi:   version==1 ? Index115Client.search
+                                          : AListService.search
+  play           -> getPlayUrl:    version==1 ? Index115Client.resolveLink (Pan115 cookie)
+                                          : AListService.getFile
 ```
 
 ## Error handling
 
-PowerList errors map to the same `BadRequestException` path AList uses
-(`logError`). A down/slow PowerList degrades one category, not the whole config.
+PowerList errors map to the same `BadRequestException` path AList uses. A
+down/slow PowerList degrades one category, not the whole config. Missing master
+Pan115 cookie at play time → clear error.
 
 ## Testing
 
-- `Index115ClientTest` with `MockRestServiceServer` (browse + search mapping).
-- `AListServiceTest`: a version-1 site routes `listFiles`/`search` to
-  `Index115Client` (mocked); a version-3 site still hits AList.
-- Seed test: creates the site when absent, leaves it when present, sets the token.
+- `Index115ClientTest` (MockRestServiceServer): browse/search/link mapping.
+- `TvBoxServiceTest` (mocked `Index115Client` + `proxyService` + repos):
+  version-1 root lists shares; drill-in encodes child paths; play decodes + calls
+  link with the Pan115 cookie; search maps results. Version-3 sites still hit AList.
+- Seed test: creates the site when absent, idempotent, token set.
 
 ## Open items (pin during implementation)
 
-1. PowerList `/index115/browse` and `/index115/search` JSON shapes → exact field
-   mapping to `FsInfo` / `SearchResult` (read PowerList `handles.Index115Browse`
-   / `Index115Search` and the `BrowseRequest`/`SearchRequest`/`FileItem` types).
-2. `browse` request parameters (path / page / size naming) must match what
-   PowerList's handler expects.
-3. Confirm `http://localhost` (no port) is the right base for the deployment, or
-   whether alist-tvbox reaches PowerList on a specific port.
+1. Exact `FileItem` field JSON names in PowerList responses (camel_case vs
+   snake_case) — read PowerList's struct tags.
+2. `browse`/`search` query-param names match the handler (`share_code`,
+   `receive_code`, `parent_id`, `q`, `page`, `per_page`).
+3. Confirm `http://localhost` (no port) reaches PowerList, or set the real port
+   on the seeded site.
