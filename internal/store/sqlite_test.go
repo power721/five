@@ -69,8 +69,8 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pending events: %v", err)
 	}
-	if len(pending) != 4 {
-		t.Fatalf("pending events = %d, want 4", len(pending))
+	if len(pending) != 2 {
+		t.Fatalf("pending events = %d, want 2", len(pending))
 	}
 	if err := s.MarkIndexEventsProcessed(ctx, []int64{pending[0].ID, pending[1].ID}); err != nil {
 		t.Fatalf("mark processed: %v", err)
@@ -123,6 +123,103 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	}
 	if got.IndexPath != manifest.IndexPath {
 		t.Fatalf("manifest path = %q", got.IndexPath)
+	}
+}
+
+func TestSQLiteStoreDoesNotQueueIndexEventsForUnchangedFiles(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().Unix()
+	files := []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", Size: 1, CrawledAt: now},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", Size: 2, CrawledAt: now},
+	}
+	if err := s.UpsertFiles(ctx, files); err != nil {
+		t.Fatalf("initial upsert files: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, files); err != nil {
+		t.Fatalf("unchanged upsert files: %v", err)
+	}
+
+	pending, err := s.PendingIndexEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("pending events: %v", err)
+	}
+	if len(pending) != len(files) {
+		t.Fatalf("pending events = %d, want %d", len(pending), len(files))
+	}
+}
+
+func TestSQLiteStoreDoesNotQueueDuplicatePendingUpsertEvents(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().Unix()
+	file := model.File{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: now}
+	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
+		t.Fatalf("initial upsert file: %v", err)
+	}
+	file.Name = "renamed.mkv"
+	file.Path = "/renamed.mkv"
+	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
+		t.Fatalf("changed upsert file: %v", err)
+	}
+
+	pending, err := s.PendingIndexEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("pending events: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending events = %d, want 1", len(pending))
+	}
+}
+
+func TestSQLiteStoreCoalescesExistingPendingUpsertEventsOnOpen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES
+		('f1', 'upsert', 1),
+		('f1', 'upsert', 2),
+		('f2', 'upsert', 3),
+		('f2', 'upsert', 4),
+		('f3', 'upsert', 5)`)
+	if err != nil {
+		t.Fatalf("insert duplicate pending events: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	pending, err := reopened.PendingIndexEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("pending events: %v", err)
+	}
+	if len(pending) != 3 {
+		t.Fatalf("pending events = %d, want 3", len(pending))
 	}
 }
 

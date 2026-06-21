@@ -165,6 +165,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("migrate share columns: %w", err)
 	}
+	if err := s.coalescePendingIndexEvents(ctx); err != nil {
+		return fmt.Errorf("coalesce pending index events: %w", err)
+	}
 	return nil
 }
 
@@ -211,6 +214,20 @@ func (s *Store) ensureColumns(ctx context.Context, table string, cols []columnDe
 	return nil
 }
 
+func (s *Store) coalescePendingIndexEvents(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE index_event
+		SET processed_at = unixepoch()
+		WHERE processed_at IS NULL
+			AND op = 'upsert'
+			AND id NOT IN (
+				SELECT MIN(id)
+				FROM index_event
+				WHERE processed_at IS NULL AND op = 'upsert'
+				GROUP BY file_id
+			);`)
+	return err
+}
+
 func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -233,23 +250,71 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 		sha1=excluded.sha1,
 		updated_at=excluded.updated_at,
 		crawled_at=excluded.crawled_at;`
-	eventStmt := `INSERT INTO index_event(file_id, op, created_at) VALUES (?, 'upsert', ?);`
+	eventStmt := `INSERT INTO index_event(file_id, op, created_at)
+		SELECT ?, 'upsert', ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM index_event WHERE file_id = ? AND op = 'upsert' AND processed_at IS NULL
+		);`
+	currentStmt := `SELECT share_code, parent_id, name, path, ext, is_dir, depth FROM file WHERE file_id = ?;`
 
 	for _, f := range files {
 		isDir := 0
 		if f.IsDir {
 			isDir = 1
 		}
+		needsIndexEvent, err := shouldQueueIndexEvent(ctx, tx, currentStmt, f, isDir)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, upsertStmt,
 			f.FileID, f.ShareCode, f.ParentID, f.Name, f.Path, f.Ext, f.Size, isDir, f.Depth, f.SHA1, f.UpdatedAt, f.CrawledAt,
 		); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, eventStmt, f.FileID, f.CrawledAt); err != nil {
-			return err
+		if needsIndexEvent {
+			if _, err := tx.ExecContext(ctx, eventStmt, f.FileID, f.CrawledAt, f.FileID); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
+}
+
+func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model.File, isDir int) (bool, error) {
+	var current struct {
+		ShareCode string
+		ParentID  string
+		Name      string
+		Path      string
+		Ext       string
+		IsDir     int
+		Depth     int
+	}
+	err := tx.QueryRowContext(ctx, stmt, f.FileID).Scan(
+		&current.ShareCode,
+		&current.ParentID,
+		&current.Name,
+		&current.Path,
+		&current.Ext,
+		&current.IsDir,
+		&current.Depth,
+	)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.ShareCode != f.ShareCode ||
+		current.ParentID != f.ParentID ||
+		current.Name != f.Name ||
+		current.Path != f.Path ||
+		current.Ext != f.Ext ||
+		current.IsDir != isDir ||
+		current.Depth != f.Depth {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Store) AllFiles(ctx context.Context) ([]model.File, error) {
