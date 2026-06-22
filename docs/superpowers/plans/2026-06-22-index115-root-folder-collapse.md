@@ -10,6 +10,38 @@
 
 ---
 
+## Revision (as-built) — approach changed to consumer-derived
+
+> The plan body below describes the ORIGINAL approach (store `root_folder_id`
+> in the `share` table, backfilled by the indexer, shipped in the export).
+> During implementation a committed guard test
+> (`TestSQLiteShareSchemaDoesNotKeepRootFolderOrMountPath`, from the `init`
+> commit) was found that forbids `root_folder_id` in the `share` table — the
+> v4.3 draft proposed it; the implementation deliberately kept it out (the root
+> is already implicit at `file.parent_id='0'`). The approach was therefore
+> switched to **consumer-derives**. See the updated spec for the rationale.
+
+**What was actually implemented (PowerList only, `internal/index115/`):**
+
+1. `shareMeta.RootFolderID` + `RefreshShares` derives the single-root folder per
+   share via one grouped query over `file(parent_id='0')` (index-served).
+2. `ListChildren` collapses the share root; `resolveFullPath` terminates at it.
+3. Plus a pre-existing compile fix: `stubStore.FileWithFullPath`.
+
+**Committed on PowerList `main`:**
+- `c9a2789c` fix(index115): stubStore implements FileWithFullPath
+- `8265240c` feat(index115): derive single-root share effective root in RefreshShares
+- `26659a0e` feat(index115): collapse single-root share in browse + full path
+
+**Not done (deliberately): no `five` indexer change, no schema change, no
+re-export, no version bump.** The fix works on the already-shipped index
+immediately (alist-tvbox need not re-download).
+
+The Part A (indexer) and Part B (consumer) tasks below are **superseded** by
+the above; they are kept as a record of the original plan.
+
+---
+
 ## File Structure
 
 ### Indexer (`five`, cwd `/home/user/workspace/five`)

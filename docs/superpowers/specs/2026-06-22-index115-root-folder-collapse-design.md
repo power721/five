@@ -28,10 +28,10 @@ results.
 ## Decision
 
 Collapse the single root folder for any share that has exactly one root entry
-(`parent_id="0"`) **and** that entry is a directory. Store that folder's
-`file_id` as `share.root_folder_id`; the consumer treats it as the share's
-effective root. `""` (default) means "no collapse" and preserves current
-behavior for multi-root / single-file-root / zero-root shares.
+(`parent_id="0"`) **and** that entry is a directory. The consumer **derives**
+that folder's `file_id` at runtime (in `RefreshShares`) and treats it as the
+share's effective root. `""` (no effective root) preserves current behavior for
+multi-root / single-file-root / zero-root shares.
 
 Two design choices, locked:
 
@@ -39,147 +39,103 @@ Two design choices, locked:
   equals `ShareTitle`. (In the common case name == title they coincide; in the
   rare renamed-share case the root folder name is dropped from the path —
   accepted for simpler, one-less-click navigation.)
-- **Compute location**: indexer populates `root_folder_id` into the `share`
-  table; it ships with the published snapshot. The consumer stays dumb (reads,
-  does not recompute).
+- **Compute location: consumer derives** — no schema change, no shipped-column.
+  See "Why not store in `share`" below.
 
-## Indexer changes (`five`)
+## Why not store `root_folder_id` in the `share` table
 
-### Schema
+An earlier draft of this design stored `root_folder_id` in the `share` table
+(backfilled by the indexer, shipped in the export). That was rejected during
+implementation: the `five` repo has a committed guard test from the `init`
+commit — `TestSQLiteShareSchemaDoesNotKeepRootFolderOrMountPath` — that
+explicitly forbids `root_folder_id` (and `mount_path`) in the `share` table.
+The v4.3 stability draft proposed them; the implementation deliberately kept
+them out because the root is already implicit (`file.parent_id='0'`) and
+storing it is redundant denormalization. Consumer-derives respects that
+invariant, needs no indexer change, no migration, no re-export, and works on
+the **already-shipped** index immediately.
 
-Add column to `share`:
+PowerList is the sole reader of the file table (alist-tvbox reaches it through
+PowerList's `/index115` API), so the rule living in PowerList costs nothing in
+DRY.
 
-```sql
-root_folder_id TEXT NOT NULL DEFAULT ''
-```
+## Consumer changes (`PowerList`, `internal/index115/store.go`) — as built
 
-Via the existing `ensureColumns(ctx, "share", ...)` migration path
-(`internal/store/sqlite.go`).
+### `shareMeta.RootFolderID`
 
-### Computation
+New field on the (unexported) `shareMeta` struct. Computed, not persisted.
 
-A **one-shot backfill into the working `share` table** (not inline in export).
-`export-db` then copies the populated value as part of its normal snapshot —
-export stays a pure copy.
+### `RefreshShares` derives the effective root
 
-This mirrors the existing `backfill-share-meta` CLI mode in shape, but with a
-crucial difference: `backfill-share-meta` hits the 115 share/snap API
-(rate-limited, needs cookie + proxy, per-share delay). `root_folder_id` is
-derived purely from the local `file` table, so the backfill is a single local
-SQL `UPDATE` — instant, idempotent, re-runnable, no network.
-
-**Performance:** the backfill does NOT scan the full directory set. It reads
-only each share's root-level rows (`parent_id='0'`), served by the existing
-`idx_file_share_parent(share_code, parent_id)` index. 94 shares ≈ 94 index
-lookups — milliseconds. The total `is_dir=1` count (119305) is irrelevant
-because every subquery filters `parent_id='0'`.
-
-**Logic** — a single `UPDATE` over all shares:
+After loading share rows, one grouped query over root-level rows derives each
+share's effective root. Index-served via `idx_file_share_parent`; reads only
+`parent_id='0'` rows, never the full tree (~119k dirs are not scanned):
 
 ```sql
-UPDATE share
-SET root_folder_id = COALESCE(
-  (SELECT f.file_id
-   FROM file f
-   WHERE f.share_code = share.share_code
-     AND f.parent_id = '0'
-     AND f.is_dir = 1
-     AND (SELECT COUNT(*) FROM file g
-          WHERE g.share_code = share.share_code
-            AND g.parent_id = '0') = 1
-   LIMIT 1),
-  '');
+SELECT share_code,
+       COUNT(*) AS n,
+       SUM(is_dir) AS dirs,
+       MAX(CASE WHEN is_dir = 1 THEN file_id END) AS dir_id
+FROM file
+WHERE parent_id = '0'
+GROUP BY share_code
 ```
 
-- Exactly one root-level row **and** it is a dir → `root_folder_id = its file_id`.
-- Otherwise (zero, multiple, or a single file) → `root_folder_id = ''`.
+For each share: `n == 1 && dirs == 1` → `RootFolderID = dir_id`; else `""`.
 
-**Wiring:**
+### `ListChildren` collapses the share root
 
-- New store method `BackfillRootFolderIDs(ctx) (updated int, error)` runs the
-  `UPDATE` on the working DB; `updated` = rows changed.
-- New CLI mode `backfill-root-folder` calls it (parity with
-  `backfill-share-meta` for explicit/ad-hoc re-runs).
-- `export-db` calls `BackfillRootFolderIDs` on the working DB **before** the
-  `VACUUM INTO` copy, as an idempotent safety net so a shipped zip is always
-  populated even if the operator skipped the manual mode. (Harmless to run
-  twice.)
+At the share root (`parentID == "0"`), if the share's `RootFolderID != ""`,
+remap to it before querying — so browsing the share lists the root folder's
+children directly, skipping the redundant folder. Drilling into children
+(parentID = some child id) is unaffected.
 
-## Consumer changes (`PowerList`, `internal/index115/`)
+### `resolveFullPath` terminates at the root folder
 
-### Read it
-
-- `shareMeta` struct gains `RootFolderID string`.
-- `RefreshShares` SELECT adds `COALESCE(root_folder_id, '')`; scan it.
-
-### Backward compatibility (old index without the column)
-
-Old published zips lack the column; a bare `SELECT root_folder_id` would throw
-"no such column" and break the whole index115 module. Mitigation:
-
-- At `OpenStoreRuntime`, run `PRAGMA table_info(share)` once and cache a
-  `hasRootFolderID bool` on the `Store`.
-- `RefreshShares` includes `root_folder_id` in the SELECT only when
-  `hasRootFolderID`; otherwise `RootFolderID` stays `""` (current behavior, no
-  collapse). Old indexes degrade gracefully with zero breakage.
-
-This mirrors the indexer's own `ensureColumns` column-detection pattern, on the
-read side.
-
-### Use it — Browse collapse (`service.go`)
-
-After normalizing `parentID` (`""` / `"/"` → `"0"`): if `parentID == "0"` and
-the share's `RootFolderID != ""`, set `parentID = RootFolderID` before
-`ListChildren`. Drilling into children (parentID = some child id) is
-unaffected.
-
-### Use it — path-walk collapse (`store.go resolveFullPath`)
-
-Add the root folder as a walk terminator: the loop condition gains
-`&& parentID != rootFolderID` (looked up from `s.shares[item.ShareCode]`). The
-returned path is relative to the root folder, so prepending `ShareTitle` no
+The parent-walk loop condition gains `&& parentID != rootFolderID`, so the
+returned path is relative to the root folder and prepending `ShareTitle` no
 longer duplicates the segment.
 
 ## Explicitly unchanged
 
+- **`five` (indexer) — entirely.** No schema, no backfill, no export change,
+  no re-export, no version bump. The guard test stays green.
 - `search.go` — returns immediate-name `path` column; no duplicate; no change.
 - `ListShares` — share node still `Path="/"+ShareTitle`; collapse happens at
   drill-in; no change.
 - Link resolution — uses `file_id` (cid), path-independent; no change.
-- `file` table and bleve index — untouched. `root_folder_id` is purely a
-  `share`-table annotation.
+- `file` table and bleve index — untouched.
+- `/index115` API responses — `root_folder_id` is not exposed; the collapse is
+  internal to `Browse`/`Detail`. Clients (incl. alist-tvbox) simply receive
+  already-collapsed children. No client change.
 
 ## Edge cases / invariants
 
-| Scenario | root_folder_id | Behavior |
+| Scenario | RootFolderID | Behavior |
 |---|---|---|
 | Multi-root share | `""` | falls back to `"0"`, identical to today |
 | Single root, but a file (not dir) | `""` | no collapse (no folder to skip) |
 | Single root dir, name ≠ ShareTitle | that file_id | collapses (root name drops from path) |
-| Stale root_folder_id (deleted folder) | n/a | consumer reads a frozen snapshot; cannot happen |
+| Empty file table (no rows) | `""` | derivation query returns nothing; no collapse |
+| Stale root folder | n/a | derived fresh on every `RefreshShares` from the live file table |
 
-## API surface
+## Testing (as built, all green)
 
-`root_folder_id` is **not** exposed in `/index115` API responses. The collapse
-is internal to `Browse`/`Detail`; clients (incl. alist-tvbox via the API)
-simply receive the already-collapsed children. No client change required.
+- `TestRefreshSharesDerivesRootFolderID` — single-root dir → id; multi-root →
+  `""`; single-root file → `""`.
+- `TestListChildrenCollapsesSingleRootFolder` — `ListChildren("0")` returns the
+  root folder's child, not the folder; `resolveFullPath` drops the root-folder
+  prefix.
+- `TestListChildrenNoCollapseWhenMultiRoot` — both root dirs returned.
+- `TestStoreListChildrenUsesShareFallbackMetadata` — updated to exercise the
+  collapsed path (still asserts share fallback metadata).
+- All existing store/service/search/linker tests pass.
 
-## Testing
+### Pre-existing, unrelated failures
 
-- **Indexer**: `BackfillRootFolderIDs` sets `root_folder_id` for a single-root-
-  dir share; `""` for multi-root, single-root-file, and zero-root; idempotent on
-  re-run; export-db populates the column in the shipped DB.
-- **Consumer**:
-  - Single-root share `Browse(parent_id="0")` → returns the root folder's
-    children directly (not the folder itself).
-  - Multi-root share `Browse` → unchanged (regression: existing tests pass).
-  - Single-root share file `resolveFullPath` → path lacks the root-folder-name
-    prefix.
-  - Old index (column absent) → no collapse, `Browse`/`resolveFullPath` take
-    the legacy path, no error.
-
-## Cross-repo
-
-Touches both `five` (export change + re-export zip) and `PowerList` (consumer
-change). Sequence: indexer + re-export first, then consumer. Spec lives in
-`five/docs/superpowers/` per the two-project layout.
+`config_test.go`'s `TestNewRuntimeOpensConfiguredManifestIndex` and
+`TestNewRuntimeFallsBackToBleveDirBaseForAbsoluteManifestIndexPath` fail
+because `runtime.go`'s `NewSearcher` has its manifest-path logic commented out
+(`loadReadyIndexPath`). Unrelated to this feature; previously masked by a
+compile break in `service_test.go` (`stubStore` missing `FileWithFullPath`),
+which this work fixed.
