@@ -96,6 +96,7 @@ Rebuild the Bleve index from SQLite:
 
 ```bash
 go run ./cmd/115-indexer -mode rebuild-index -db data/index.db -bleve data/bleve
+
 ```
 
 ```bash
@@ -113,6 +114,7 @@ Package a self-contained index for downstream consumers (alist-tvbox / PowerList
 
 ```bash
 go run ./cmd/115-indexer -mode export-db -db data/index.db -bleve data/bleve -out 115.index.zip
+
 ```
 
 `115.index.zip` contains a trimmed `index.db` (only `file` and `share` tables)
