@@ -5,7 +5,6 @@ type File struct {
 	ShareCode string
 	ParentID  string
 	Name      string
-	Path      string
 	Ext       string
 	Size      int64
 	IsDir     bool
@@ -30,7 +29,6 @@ type Share struct {
 
 type CrawlTask struct {
 	CID   string `json:"cid"`
-	Path  string `json:"path"`
 	Depth int    `json:"depth"`
 }
 
@@ -38,7 +36,6 @@ type Checkpoint struct {
 	ShareCode   string
 	CID         string
 	NextOffset  int
-	ActivePath  string
 	ActiveDepth int
 	Queue       []CrawlTask
 	Visited     map[string]bool

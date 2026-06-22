@@ -31,7 +31,6 @@ func TestRebuildCreatesSearchableIndexAndManifest(t *testing.T) {
 				ShareCode: "swf01d43zby",
 				ParentID:  "0",
 				Name:      "Avatar.2009.2160p.mkv",
-				Path:      "/Avatar.2009.2160p.mkv",
 				Ext:       "mkv",
 			},
 		},
@@ -113,7 +112,6 @@ func TestApplyPendingEventsIndexesNewFiles(t *testing.T) {
 				FileID:    "f1",
 				ShareCode: "swf01d43zby",
 				Name:      "Avatar.2009.2160p.mkv",
-				Path:      "/Avatar.2009.2160p.mkv",
 				Ext:       "mkv",
 			},
 		},
@@ -127,7 +125,6 @@ func TestApplyPendingEventsIndexesNewFiles(t *testing.T) {
 		FileID:    "f2",
 		ShareCode: "swf01d43zby",
 		Name:      "Born.with.Luck.S01E01.mp4",
-		Path:      "/Born.with.Luck.S01E01.mp4",
 		Ext:       "mp4",
 	}
 	provider.events = []model.IndexEvent{
@@ -195,7 +192,6 @@ func TestRunEventLoopStopsWithContext(t *testing.T) {
 					FileID:    "f1",
 					ShareCode: "swf01d43zby",
 					Name:      "Avatar.2009.2160p.mkv",
-					Path:      "/Avatar.2009.2160p.mkv",
 					Ext:       "mkv",
 				},
 			},
@@ -235,9 +231,9 @@ func TestRunEventLoopDrainsBacklogBeforeSleeping(t *testing.T) {
 	provider := &loopingEventProvider{
 		eventProvider: eventProvider{
 			files: map[string]model.File{
-				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
-				"f2": {FileID: "f2", ShareCode: "sw1", Name: "B.mkv", Path: "/B.mkv", Ext: "mkv"},
-				"f3": {FileID: "f3", ShareCode: "sw1", Name: "C.mkv", Path: "/C.mkv", Ext: "mkv"},
+				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Ext: "mkv"},
+				"f2": {FileID: "f2", ShareCode: "sw1", Name: "B.mkv", Ext: "mkv"},
+				"f3": {FileID: "f3", ShareCode: "sw1", Name: "C.mkv", Ext: "mkv"},
 			},
 			events: []model.IndexEvent{
 				{ID: 1, FileID: "f1", Op: "upsert"},
@@ -313,7 +309,7 @@ func TestRunEventLoopRetriesTransientErrors(t *testing.T) {
 	provider := &flakyProvider{
 		eventProvider: eventProvider{
 			files: map[string]model.File{
-				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Ext: "mkv"},
 			},
 			events: []model.IndexEvent{{ID: 1, FileID: "f1", Op: "upsert"}},
 		},

@@ -29,7 +29,6 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 			ShareCode: "swf01d43zby",
 			ParentID:  "0",
 			Name:      "Avatar.mkv",
-			Path:      "/Avatar.mkv",
 			Ext:       "mkv",
 			Size:      1024,
 			IsDir:     false,
@@ -42,7 +41,6 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 			ShareCode: "swf01d43zby",
 			ParentID:  "0",
 			Name:      "Season 01",
-			Path:      "/Season 01",
 			Ext:       "",
 			Size:      0,
 			IsDir:     true,
@@ -81,7 +79,7 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 		ShareCode: "swf01d43zby",
 		CID:       "0",
 		Queue: []model.CrawlTask{
-			{CID: "1", Path: "/Season 01", Depth: 1},
+			{CID: "1", Depth: 1},
 		},
 		Visited: map[string]bool{
 			"0": true,
@@ -139,8 +137,8 @@ func TestSQLiteStoreDoesNotQueueIndexEventsForUnchangedFiles(t *testing.T) {
 
 	now := time.Now().Unix()
 	files := []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", Size: 1, CrawledAt: now},
-		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", Size: 2, CrawledAt: now},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", Size: 1, CrawledAt: now},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Ext: "mkv", Size: 2, CrawledAt: now},
 	}
 	if err := s.UpsertFiles(ctx, files); err != nil {
 		t.Fatalf("initial upsert files: %v", err)
@@ -169,12 +167,11 @@ func TestSQLiteStoreDoesNotQueueDuplicatePendingUpsertEvents(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().Unix()
-	file := model.File{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: now}
+	file := model.File{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: now}
 	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
 		t.Fatalf("initial upsert file: %v", err)
 	}
 	file.Name = "renamed.mkv"
-	file.Path = "/renamed.mkv"
 	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
 		t.Fatalf("changed upsert file: %v", err)
 	}
@@ -242,9 +239,9 @@ func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 	}
 	now := time.Now().Unix()
 	files := []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: now},
-		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", CrawledAt: now},
-		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Path: "/c.mkv", Ext: "mkv", CrawledAt: now},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: now},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Ext: "mkv", CrawledAt: now},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Ext: "mkv", CrawledAt: now},
 	}
 	if err := s.UpsertFiles(ctx, files); err != nil {
 		t.Fatalf("upsert files: %v", err)
@@ -524,9 +521,9 @@ func TestSQLiteStoreCountFilesByShare(t *testing.T) {
 	defer s.Close()
 
 	if err := s.UpsertFiles(ctx, []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
-		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Path: "/b.mkv", Ext: "mkv", CrawledAt: 1},
-		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Path: "/c.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Ext: "mkv", CrawledAt: 1},
 	}); err != nil {
 		t.Fatalf("upsert files: %v", err)
 	}
@@ -564,7 +561,7 @@ func TestSQLiteStoreExportSnapshotIsSelfContained(t *testing.T) {
 		t.Fatalf("update share meta: %v", err)
 	}
 	if err := s.UpsertFiles(ctx, []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: 1},
 	}); err != nil {
 		t.Fatalf("upsert files: %v", err)
 	}
@@ -664,6 +661,69 @@ func TestSQLiteStoreMigrationAddsShareMetaColumnsToExistingDB(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreMigrationDropsLegacyPathColumn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	// Simulate a pre-migration DB: file carried a redundant path column (only ever
+	// "/name") plus its index.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE file (
+		file_id TEXT PRIMARY KEY,
+		share_code TEXT NOT NULL,
+		parent_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		path TEXT NOT NULL,
+		ext TEXT NOT NULL DEFAULT '',
+		size INTEGER NOT NULL DEFAULT 0,
+		is_dir INTEGER NOT NULL DEFAULT 0,
+		depth INTEGER NOT NULL DEFAULT 0,
+		sha1 TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER,
+		crawled_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy file: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE INDEX idx_file_share_path ON file(share_code, path)`); err != nil {
+		t.Fatalf("create legacy index: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO file(file_id, share_code, parent_id, name, path, crawled_at) VALUES('f1','sw1','0','a.mkv','/a.mkv',1)`); err != nil {
+		t.Fatalf("seed legacy file: %v", err)
+	}
+	raw.Close()
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store (migrate): %v", err)
+	}
+	defer s.Close()
+
+	if exists, err := s.columnExists(ctx, "file", "path"); err != nil {
+		t.Fatalf("columnExists: %v", err)
+	} else if exists {
+		t.Fatal("legacy path column should be dropped after migration")
+	}
+	// The row must survive the column drop.
+	got, ok, err := s.FileByID(ctx, "f1")
+	if err != nil || !ok {
+		t.Fatalf("file f1 after migrate: ok=%v err=%v", ok, err)
+	}
+	if got.Name != "a.mkv" {
+		t.Fatalf("name after migrate = %q, want a.mkv", got.Name)
+	}
+	// The legacy index must be gone too.
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_file_share_path'`).Scan(&n); err != nil {
+		t.Fatalf("count legacy index: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("legacy idx_file_share_path should be dropped, found %d", n)
+	}
+}
+
 func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
@@ -674,12 +734,12 @@ func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
 		t.Fatalf("upsert share: %v", err)
 	}
 	if err := s.UpsertFiles(ctx, []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Path: "/a.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: 1},
 	}); err != nil {
 		t.Fatalf("upsert files: %v", err)
 	}
 	// Populate the tables that must be dropped.
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code,cid,next_offset,active_path,active_depth,queue_json,visited_json,updated_at) VALUES('sw1','0',0,'',0,'[]','{}',1)`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code,cid,next_offset,active_depth,queue_json,visited_json,updated_at) VALUES('sw1','0',0,0,'[]','{}',1)`); err != nil {
 		t.Fatalf("insert checkpoint: %v", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id,op,created_at) VALUES('f1','upsert',1)`); err != nil {
@@ -737,7 +797,7 @@ func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
 
 	var idx int
 	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file' AND name LIKE 'idx_file_%'").Scan(&idx)
-	if idx != 5 {
-		t.Fatalf("file indexes = %d, want 5", idx)
+	if idx != 4 {
+		t.Fatalf("file indexes = %d, want 4", idx)
 	}
 }

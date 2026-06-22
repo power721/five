@@ -3,7 +3,6 @@ package crawler
 import (
 	"context"
 	"log"
-	"path"
 	"strings"
 	"time"
 
@@ -68,18 +67,15 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 	}
 	activeCID := ""
 	activeOffset := 0
-	activePath := ""
 	activeDepth := 0
 	if ok && cp.CID != "" && !cp.Visited[cp.CID] {
 		activeCID = cp.CID
 		activeOffset = cp.NextOffset
-		activePath = cp.ActivePath
 		activeDepth = cp.ActiveDepth
 	}
 	if len(queue) == 0 && activeCID == "" {
 		queue = append(queue, model.CrawlTask{
 			CID:   RootCID,
-			Path:  "",
 			Depth: 0,
 		})
 	}
@@ -94,7 +90,7 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		var task model.CrawlTask
 		offset := 0
 		if activeCID != "" {
-			task = model.CrawlTask{CID: activeCID, Path: activePath, Depth: activeDepth}
+			task = model.CrawlTask{CID: activeCID, Depth: activeDepth}
 			activeCID = ""
 			offset = activeOffset
 			activeOffset = 0
@@ -113,7 +109,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				ShareCode:   share.ShareCode,
 				CID:         task.CID,
 				NextOffset:  offset,
-				ActivePath:  task.Path,
 				ActiveDepth: task.Depth,
 				Queue:       append([]model.CrawlTask(nil), queue...),
 				Visited:     cloneVisited(visited),
@@ -149,9 +144,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				break
 			}
 			for i := range page.Nodes {
-				if page.Nodes[i].Path == "" {
-					page.Nodes[i].Path = path.Join(task.Path, page.Nodes[i].Name)
-				}
 				page.Nodes[i].ShareCode = share.ShareCode
 				page.Nodes[i].CrawledAt = crawledAt
 				page.Nodes[i].Depth = task.Depth + 1
@@ -174,7 +166,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				if node.IsDir {
 					queue = append(queue, model.CrawlTask{
 						CID:   node.FileID,
-						Path:  node.Path,
 						Depth: node.Depth,
 					})
 				}
@@ -183,7 +174,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				ShareCode:   share.ShareCode,
 				CID:         task.CID,
 				NextOffset:  offset + c.cfg.PageSize,
-				ActivePath:  task.Path,
 				ActiveDepth: task.Depth,
 				Queue:       append([]model.CrawlTask(nil), queue...),
 				Visited:     cloneVisited(visited),
@@ -204,7 +194,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		ShareCode:   share.ShareCode,
 		CID:         RootCID,
 		NextOffset:  0,
-		ActivePath:  "",
 		ActiveDepth: 0,
 		Queue:       nil,
 		Visited:     cloneVisited(visited),

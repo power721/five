@@ -96,7 +96,7 @@ func (n SnapNode) IsDir() bool {
 	return n.Dir == 1
 }
 
-func (n SnapNode) ToFile(shareCode, parentID, filePath string, depth int, crawledAt int64) model.File {
+func (n SnapNode) ToFile(shareCode, parentID string, depth int, crawledAt int64) model.File {
 	ext := ""
 	if !n.IsDir() {
 		ext = strings.TrimPrefix(path.Ext(n.Name), ".")
@@ -110,7 +110,6 @@ func (n SnapNode) ToFile(shareCode, parentID, filePath string, depth int, crawle
 		ShareCode: shareCode,
 		ParentID:  parentID,
 		Name:      n.Name,
-		Path:      filePath,
 		Ext:       ext,
 		Size:      n.Size,
 		IsDir:     n.IsDir(),

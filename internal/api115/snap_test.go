@@ -81,7 +81,7 @@ func TestSnapResponsePreservesIDsAndMapsNodes(t *testing.T) {
 		t.Fatalf("count = %d, want 24", resp.Data.Count)
 	}
 
-	file := resp.Data.List[0].ToFile("swf01d43zby", "3427894426395595175", "/Born with Luck.S01E24.2160p.DV.H.265.DDP 5.1.mp4", 1, 123)
+	file := resp.Data.List[0].ToFile("swf01d43zby", "3427894426395595175", 1, 123)
 	if file.FileID != "3427894426982797760" {
 		t.Fatalf("file id = %q", file.FileID)
 	}
@@ -101,7 +101,7 @@ func TestSnapResponsePreservesIDsAndMapsNodes(t *testing.T) {
 		t.Fatal("file should not be a directory")
 	}
 
-	dir := resp.Data.List[1].ToFile("swf01d43zby", "3427894426395595175", "/Season 01", 1, 123)
+	dir := resp.Data.List[1].ToFile("swf01d43zby", "3427894426395595175", 1, 123)
 	if dir.FileID != "3427894426395595401" {
 		t.Fatalf("directory id = %q", dir.FileID)
 	}
@@ -124,7 +124,7 @@ func TestSnapNodeWithFIDIsStillFileWhenDIsOne(t *testing.T) {
 	if err := json.Unmarshal([]byte(sampleSnapFileWithD1), &resp); err != nil {
 		t.Fatalf("unmarshal snap: %v", err)
 	}
-	file := resp.Data.List[0].ToFile("swf01d43zby", "0", "/Born with Luck.S01E24.2160p.DV.H.265.DDP 5.1.mp4", 1, 123)
+	file := resp.Data.List[0].ToFile("swf01d43zby", "0", 1, 123)
 	if file.IsDir {
 		t.Fatal("node with fid should be treated as file")
 	}
@@ -168,7 +168,7 @@ func TestSnapNodeDirectoryHasNoExt(t *testing.T) {
 	// A directory whose name contains dots must not be given a bogus extension
 	// (e.g. "电影-欧美高清3.89T" must not yield ext "89T").
 	dir := SnapNode{CID: "2656232060400365768", Name: "电影-欧美高清3.89T"}
-	f := dir.ToFile("sw68wz93ncb", "0", "/电影-欧美高清3.89T", 1, 100)
+	f := dir.ToFile("sw68wz93ncb", "0", 1, 100)
 	if !f.IsDir {
 		t.Fatal("expected node to be a directory")
 	}

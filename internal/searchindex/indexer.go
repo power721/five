@@ -42,8 +42,6 @@ type searchDoc struct {
 	FileID    string `json:"file_id"`
 	ShareCode string `json:"share_code"`
 	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Ext       string `json:"ext"`
 	IsDir     bool   `json:"is_dir"`
 	Depth     int    `json:"depth"`
 }
@@ -85,8 +83,6 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 			FileID:    f.FileID,
 			ShareCode: f.ShareCode,
 			Name:      f.Name,
-			Path:      f.Path,
-			Ext:       f.Ext,
 			IsDir:     f.IsDir,
 			Depth:     f.Depth,
 		}
@@ -158,8 +154,6 @@ func (b *Builder) applyInto(ctx context.Context, index bleve.Index, provider Eve
 				FileID:    file.FileID,
 				ShareCode: file.ShareCode,
 				Name:      file.Name,
-				Path:      file.Path,
-				Ext:       file.Ext,
 				IsDir:     file.IsDir,
 				Depth:     file.Depth,
 			}); err != nil {
@@ -184,15 +178,9 @@ func buildMapping() mapping.IndexMapping {
 	docMapping := bleve.NewDocumentMapping()
 	nameField := bleve.NewTextFieldMapping()
 	nameField.Store = true
-	pathField := bleve.NewTextFieldMapping()
-	pathField.Store = true
-	extField := bleve.NewKeywordFieldMapping()
-	extField.Store = true
 	shareField := bleve.NewKeywordFieldMapping()
 	shareField.Store = true
 	docMapping.AddFieldMappingsAt("name", nameField)
-	docMapping.AddFieldMappingsAt("path", pathField)
-	docMapping.AddFieldMappingsAt("ext", extField)
 	docMapping.AddFieldMappingsAt("share_code", shareField)
 	indexMapping.AddDocumentMapping("doc", docMapping)
 	indexMapping.DefaultType = "doc"

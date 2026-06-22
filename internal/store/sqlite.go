@@ -153,7 +153,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			share_code TEXT NOT NULL,
 			parent_id TEXT NOT NULL,
 			name TEXT NOT NULL,
-			path TEXT NOT NULL,
 			ext TEXT NOT NULL DEFAULT '',
 			size INTEGER NOT NULL DEFAULT 0,
 			is_dir INTEGER NOT NULL DEFAULT 0,
@@ -163,7 +162,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			crawled_at INTEGER NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_share_path ON file(share_code, path);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
@@ -171,7 +169,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			share_code TEXT PRIMARY KEY,
 			cid TEXT NOT NULL,
 			next_offset INTEGER NOT NULL DEFAULT 0,
-			active_path TEXT NOT NULL DEFAULT '',
 			active_depth INTEGER NOT NULL DEFAULT 0,
 			queue_json TEXT NOT NULL,
 			visited_json TEXT NOT NULL,
@@ -213,7 +210,70 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.coalescePendingIndexEvents(ctx); err != nil {
 		return fmt.Errorf("coalesce pending index events: %w", err)
 	}
+	if err := s.dropLegacyColumns(ctx); err != nil {
+		return fmt.Errorf("drop legacy columns: %w", err)
+	}
 	return nil
+}
+
+// dropLegacyColumns removes columns that were dropped from the schema. SQLite
+// requires a column's index to be dropped first, so each entry may name an
+// index to remove beforehand. Only runs on databases that still carry the
+// legacy column; fresh databases built from the current schema never have it.
+// path was only ever the leaf "/name" segment (the real tree is parent_id), and
+// active_path tracked crawler BFS state that is no longer stored.
+func (s *Store) dropLegacyColumns(ctx context.Context) error {
+	drops := []struct {
+		table string
+		col   string
+		index string
+	}{
+		{"file", "path", "idx_file_share_path"},
+		{"crawl_checkpoint", "active_path", ""},
+	}
+	for _, d := range drops {
+		exists, err := s.columnExists(ctx, d.table, d.col)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if d.index != "" {
+			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DROP INDEX IF EXISTS %s;", d.index)); err != nil {
+				return fmt.Errorf("drop index %s: %w", d.index, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", d.table, d.col)); err != nil {
+			return fmt.Errorf("drop column %s.%s: %w", d.table, d.col, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) columnExists(ctx context.Context, table, col string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notNull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 type columnDef struct {
@@ -281,13 +341,12 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 	defer tx.Rollback()
 
 	upsertStmt := `INSERT INTO file (
-		file_id, share_code, parent_id, name, path, ext, size, is_dir, depth, sha1, updated_at, crawled_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at, crawled_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(file_id) DO UPDATE SET
 		share_code=excluded.share_code,
 		parent_id=excluded.parent_id,
 		name=excluded.name,
-		path=excluded.path,
 		ext=excluded.ext,
 		size=excluded.size,
 		is_dir=excluded.is_dir,
@@ -300,7 +359,7 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 		WHERE NOT EXISTS (
 			SELECT 1 FROM index_event WHERE file_id = ? AND op = 'upsert' AND processed_at IS NULL
 		);`
-	currentStmt := `SELECT share_code, parent_id, name, path, ext, is_dir, depth FROM file WHERE file_id = ?;`
+	currentStmt := `SELECT share_code, parent_id, name, ext, is_dir, depth FROM file WHERE file_id = ?;`
 
 	for _, f := range files {
 		isDir := 0
@@ -312,7 +371,7 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, upsertStmt,
-			f.FileID, f.ShareCode, f.ParentID, f.Name, f.Path, f.Ext, f.Size, isDir, f.Depth, f.SHA1, f.UpdatedAt, f.CrawledAt,
+			f.FileID, f.ShareCode, f.ParentID, f.Name, f.Ext, f.Size, isDir, f.Depth, f.SHA1, f.UpdatedAt, f.CrawledAt,
 		); err != nil {
 			return err
 		}
@@ -330,7 +389,6 @@ func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model
 		ShareCode string
 		ParentID  string
 		Name      string
-		Path      string
 		Ext       string
 		IsDir     int
 		Depth     int
@@ -339,7 +397,6 @@ func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model
 		&current.ShareCode,
 		&current.ParentID,
 		&current.Name,
-		&current.Path,
 		&current.Ext,
 		&current.IsDir,
 		&current.Depth,
@@ -353,7 +410,6 @@ func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model
 	if current.ShareCode != f.ShareCode ||
 		current.ParentID != f.ParentID ||
 		current.Name != f.Name ||
-		current.Path != f.Path ||
 		current.Ext != f.Ext ||
 		current.IsDir != isDir ||
 		current.Depth != f.Depth {
@@ -363,7 +419,7 @@ func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model
 }
 
 func (s *Store) AllFiles(ctx context.Context) ([]model.File, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT file_id, share_code, parent_id, name, path, ext, size, is_dir, depth, sha1, COALESCE(updated_at, 0), crawled_at FROM file ORDER BY path ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, COALESCE(updated_at, 0), crawled_at FROM file ORDER BY name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +429,7 @@ func (s *Store) AllFiles(ctx context.Context) ([]model.File, error) {
 	for rows.Next() {
 		var f model.File
 		var isDir int
-		if err := rows.Scan(&f.FileID, &f.ShareCode, &f.ParentID, &f.Name, &f.Path, &f.Ext, &f.Size, &isDir, &f.Depth, &f.SHA1, &f.UpdatedAt, &f.CrawledAt); err != nil {
+		if err := rows.Scan(&f.FileID, &f.ShareCode, &f.ParentID, &f.Name, &f.Ext, &f.Size, &isDir, &f.Depth, &f.SHA1, &f.UpdatedAt, &f.CrawledAt); err != nil {
 			return nil, err
 		}
 		f.IsDir = isDir == 1
@@ -392,11 +448,11 @@ func (s *Store) CountFiles(ctx context.Context) (int, error) {
 }
 
 func (s *Store) FileByID(ctx context.Context, fileID string) (model.File, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT file_id, share_code, parent_id, name, path, ext, size, is_dir, depth, sha1, COALESCE(updated_at, 0), crawled_at
+	row := s.db.QueryRowContext(ctx, `SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, COALESCE(updated_at, 0), crawled_at
 		FROM file WHERE file_id = ?`, fileID)
 	var f model.File
 	var isDir int
-	err := row.Scan(&f.FileID, &f.ShareCode, &f.ParentID, &f.Name, &f.Path, &f.Ext, &f.Size, &isDir, &f.Depth, &f.SHA1, &f.UpdatedAt, &f.CrawledAt)
+	err := row.Scan(&f.FileID, &f.ShareCode, &f.ParentID, &f.Name, &f.Ext, &f.Size, &isDir, &f.Depth, &f.SHA1, &f.UpdatedAt, &f.CrawledAt)
 	if err == sql.ErrNoRows {
 		return model.File{}, false, nil
 	}
@@ -416,26 +472,25 @@ func (s *Store) SaveCheckpoint(ctx context.Context, cp model.Checkpoint) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code, cid, next_offset, active_path, active_depth, queue_json, visited_json, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code, cid, next_offset, active_depth, queue_json, visited_json, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(share_code) DO UPDATE SET
 		cid=excluded.cid,
 		next_offset=excluded.next_offset,
-		active_path=excluded.active_path,
 		active_depth=excluded.active_depth,
 		queue_json=excluded.queue_json,
 		visited_json=excluded.visited_json,
 		updated_at=excluded.updated_at;`,
-		cp.ShareCode, cp.CID, cp.NextOffset, cp.ActivePath, cp.ActiveDepth, string(queueJSON), string(visitedJSON), cp.UpdatedAt)
+		cp.ShareCode, cp.CID, cp.NextOffset, cp.ActiveDepth, string(queueJSON), string(visitedJSON), cp.UpdatedAt)
 	return err
 }
 
 func (s *Store) LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT share_code, cid, next_offset, active_path, active_depth, queue_json, visited_json, updated_at FROM crawl_checkpoint WHERE share_code = ?`, shareCode)
+	row := s.db.QueryRowContext(ctx, `SELECT share_code, cid, next_offset, active_depth, queue_json, visited_json, updated_at FROM crawl_checkpoint WHERE share_code = ?`, shareCode)
 	var cp model.Checkpoint
 	var queueJSON string
 	var visitedJSON string
-	err := row.Scan(&cp.ShareCode, &cp.CID, &cp.NextOffset, &cp.ActivePath, &cp.ActiveDepth, &queueJSON, &visitedJSON, &cp.UpdatedAt)
+	err := row.Scan(&cp.ShareCode, &cp.CID, &cp.NextOffset, &cp.ActiveDepth, &queueJSON, &visitedJSON, &cp.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return model.Checkpoint{}, false, nil
 	}

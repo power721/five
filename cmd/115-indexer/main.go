@@ -402,8 +402,7 @@ func (l apiLister) ListPage(ctx context.Context, share model.Share, cid string, 
 	}
 	nodes := make([]model.File, 0, len(resp.Data.List))
 	for _, node := range resp.Data.List {
-		filePath := "/" + node.Name
-		nodes = append(nodes, node.ToFile(share.ShareCode, cid, filePath, 0, time.Now().Unix()))
+		nodes = append(nodes, node.ToFile(share.ShareCode, cid, 0, time.Now().Unix()))
 	}
 	return crawler.Page{
 		Nodes:      nodes,

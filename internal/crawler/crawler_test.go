@@ -89,8 +89,8 @@ func TestCrawlerCrawlShareBFSAndCheckpoint(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Season 01", Path: "/Season 01", IsDir: true, Depth: 1},
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Avatar.mkv", Path: "/Avatar.mkv", Ext: "mkv", Depth: 1},
+						{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Season 01", IsDir: true, Depth: 1},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Avatar.mkv", Ext: "mkv", Depth: 1},
 					},
 					HasMore: false,
 				},
@@ -98,7 +98,7 @@ func TestCrawlerCrawlShareBFSAndCheckpoint(t *testing.T) {
 			"d1": {
 				{
 					Nodes: []model.File{
-						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Path: "/Season 01/Episode 1.mkv", Ext: "mkv", Depth: 2},
+						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Ext: "mkv", Depth: 2},
 					},
 					HasMore: false,
 				},
@@ -136,19 +136,19 @@ func TestCrawlerFiltersToMediaAndSubtitleFiles(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "v1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.mkv", Path: "/Movie.mkv", Ext: "mkv", Depth: 1},
-						{FileID: "s1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.ass", Path: "/Movie.ass", Ext: "ass", Depth: 1},
-						{FileID: "o1", ShareCode: "swf01d43zby", ParentID: "0", Name: "LegacyMovie.rmvb", Path: "/LegacyMovie.rmvb", Ext: "rmvb", Depth: 1},
-						{FileID: "o2", ShareCode: "swf01d43zby", ParentID: "0", Name: "Archive.asf", Path: "/Archive.asf", Ext: "asf", Depth: 1},
-						{FileID: "o3", ShareCode: "swf01d43zby", ParentID: "0", Name: "HiRes.dsf", Path: "/HiRes.dsf", Ext: "dsf", Depth: 1},
-						{FileID: "o4", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.ttml", Path: "/Movie.ttml", Ext: "ttml", Depth: 1},
-						{FileID: "n1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.nfo", Path: "/Movie.nfo", Ext: "nfo", Depth: 1},
-						{FileID: "t1", ShareCode: "swf01d43zby", ParentID: "0", Name: "notes.txt", Path: "/notes.txt", Ext: "txt", Depth: 1},
-						{FileID: "x1", ShareCode: "swf01d43zby", ParentID: "0", Name: "playlist.m3u8", Path: "/playlist.m3u8", Ext: "m3u8", Depth: 1},
-						{FileID: "x2", ShareCode: "swf01d43zby", ParentID: "0", Name: "disc.cda", Path: "/disc.cda", Ext: "cda", Depth: 1},
-						{FileID: "x3", ShareCode: "swf01d43zby", ParentID: "0", Name: "stream.ram", Path: "/stream.ram", Ext: "ram", Depth: 1},
-						{FileID: "x4", ShareCode: "swf01d43zby", ParentID: "0", Name: "clip.swf", Path: "/clip.swf", Ext: "swf", Depth: 1},
-						{FileID: "x5", ShareCode: "swf01d43zby", ParentID: "0", Name: "tone.mid", Path: "/tone.mid", Ext: "mid", Depth: 1},
+						{FileID: "v1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.mkv", Ext: "mkv", Depth: 1},
+						{FileID: "s1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.ass", Ext: "ass", Depth: 1},
+						{FileID: "o1", ShareCode: "swf01d43zby", ParentID: "0", Name: "LegacyMovie.rmvb", Ext: "rmvb", Depth: 1},
+						{FileID: "o2", ShareCode: "swf01d43zby", ParentID: "0", Name: "Archive.asf", Ext: "asf", Depth: 1},
+						{FileID: "o3", ShareCode: "swf01d43zby", ParentID: "0", Name: "HiRes.dsf", Ext: "dsf", Depth: 1},
+						{FileID: "o4", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.ttml", Ext: "ttml", Depth: 1},
+						{FileID: "n1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.nfo", Ext: "nfo", Depth: 1},
+						{FileID: "t1", ShareCode: "swf01d43zby", ParentID: "0", Name: "notes.txt", Ext: "txt", Depth: 1},
+						{FileID: "x1", ShareCode: "swf01d43zby", ParentID: "0", Name: "playlist.m3u8", Ext: "m3u8", Depth: 1},
+						{FileID: "x2", ShareCode: "swf01d43zby", ParentID: "0", Name: "disc.cda", Ext: "cda", Depth: 1},
+						{FileID: "x3", ShareCode: "swf01d43zby", ParentID: "0", Name: "stream.ram", Ext: "ram", Depth: 1},
+						{FileID: "x4", ShareCode: "swf01d43zby", ParentID: "0", Name: "clip.swf", Ext: "swf", Depth: 1},
+						{FileID: "x5", ShareCode: "swf01d43zby", ParentID: "0", Name: "tone.mid", Ext: "mid", Depth: 1},
 					},
 					HasMore: false,
 				},
@@ -191,13 +191,13 @@ func TestCrawlerResumesFromNextPageAfterFailure(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Ext: "mkv"},
 					},
 					HasMore: true,
 				},
 				{
 					Nodes: []model.File{
-						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "0", Name: "B.mkv", Path: "/B.mkv", Ext: "mkv"},
+						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "0", Name: "B.mkv", Ext: "mkv"},
 					},
 					HasMore: false,
 				},
@@ -243,8 +243,8 @@ func TestCrawlerResumesActiveCIDAfterFailureAtOffsetZero(t *testing.T) {
 			"root": {
 				{
 					Nodes: []model.File{
-						{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Season 01", Path: "/Season 01", IsDir: true},
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Movie.mkv", Path: "/Movie.mkv", Ext: "mkv"},
+						{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Season 01", IsDir: true},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "root", Name: "Movie.mkv", Ext: "mkv"},
 					},
 					HasMore: false,
 				},
@@ -252,7 +252,7 @@ func TestCrawlerResumesActiveCIDAfterFailureAtOffsetZero(t *testing.T) {
 			"d1": {
 				{
 					Nodes: []model.File{
-						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Path: "/Season 01/Episode 1.mkv", Ext: "mkv"},
+						{FileID: "f2", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Ext: "mkv"},
 					},
 					HasMore: false,
 				},
@@ -269,10 +269,9 @@ func TestCrawlerResumesActiveCIDAfterFailureAtOffsetZero(t *testing.T) {
 			ShareCode:   "swf01d43zby",
 			CID:         "d1",
 			NextOffset:  0,
-			ActivePath:  "/Season 01",
 			ActiveDepth: 1,
 			Queue: []model.CrawlTask{
-				{CID: "root", Path: "", Depth: 0},
+				{CID: "root", Depth: 0},
 			},
 			Visited: map[string]bool{},
 		},
@@ -307,7 +306,7 @@ func TestCrawlerLogsProgress(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.mkv", Path: "/Movie.mkv", Ext: "mkv", Depth: 1},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Movie.mkv", Ext: "mkv", Depth: 1},
 					},
 					HasMore: false,
 				},
@@ -342,7 +341,7 @@ func TestCrawlerPersistsShareMetadataOncePerCrawl(t *testing.T) {
 					ShareTitle: "电影-欧美高清3.89T",
 					FileSize:   4273516964003,
 					Nodes: []model.File{
-						{FileID: "d1", ShareCode: "sw68wz93ncb", ParentID: "0", Name: "Folder", Path: "/Folder", IsDir: true, Depth: 1},
+						{FileID: "d1", ShareCode: "sw68wz93ncb", ParentID: "0", Name: "Folder", IsDir: true, Depth: 1},
 					},
 					HasMore: false,
 				},
@@ -352,7 +351,7 @@ func TestCrawlerPersistsShareMetadataOncePerCrawl(t *testing.T) {
 					ShareTitle: "电影-欧美高清3.89T",
 					FileSize:   4273516964003,
 					Nodes: []model.File{
-						{FileID: "f1", ShareCode: "sw68wz93ncb", ParentID: "d1", Name: "x.mkv", Path: "/Folder/x.mkv", Ext: "mkv", Depth: 2},
+						{FileID: "f1", ShareCode: "sw68wz93ncb", ParentID: "d1", Name: "x.mkv", Ext: "mkv", Depth: 2},
 					},
 					HasMore: false,
 				},
@@ -406,7 +405,7 @@ func TestCrawlerRetriesRetryablePageFailureInPlace(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Ext: "mkv"},
 					},
 					HasMore: false,
 				},
@@ -446,7 +445,7 @@ func TestCrawlerRetriesProxyFailureInPlace(t *testing.T) {
 			"0": {
 				{
 					Nodes: []model.File{
-						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Path: "/A.mkv", Ext: "mkv"},
+						{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "0", Name: "A.mkv", Ext: "mkv"},
 					},
 					HasMore: false,
 				},
