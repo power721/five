@@ -27,6 +27,14 @@ type Share struct {
 	RetryAfterUnix int64
 }
 
+// ShareGroup is one virtual directory from the grouping overlay
+// (internal/shares groups.go). ShareCodes holds the member share codes in
+// file order; the store assigns group_id by slice order.
+type ShareGroup struct {
+	Name       string
+	ShareCodes []string
+}
+
 type CrawlTask struct {
 	CID   string `json:"cid"`
 	Depth int    `json:"depth"`
