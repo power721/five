@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -724,7 +726,7 @@ func TestSQLiteStoreMigrationDropsLegacyPathColumn(t *testing.T) {
 	}
 }
 
-func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
+func TestExportTrimmedKeepsFileShareAndShareGroup(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {
@@ -784,8 +786,8 @@ func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
 		tables = append(tables, n)
 	}
 	rows.Close()
-	if got := strings.Join(tables, ","); got != "file,share" {
-		t.Fatalf("tables = %q, want file,share", got)
+	if got := strings.Join(tables, ","); got != "file,share,share_group" {
+		t.Fatalf("tables = %q, want file,share,share_group", got)
 	}
 
 	var files, shares int
@@ -863,5 +865,120 @@ func TestExportTrimmedPrunesDeadSharesAndTheirFiles(t *testing.T) {
 	db.QueryRowContext(ctx, "SELECT file_id FROM file").Scan(&fileID)
 	if fileID != "f1" {
 		t.Fatalf("remaining file = %q, want f1", fileID)
+	}
+}
+
+func TestApplyGroupsAssignsMembershipAndDormant(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	for _, sc := range []string{"sw1", "sw2"} {
+		if err := s.UpsertShare(ctx, model.Share{ShareCode: sc, ReceiveCode: "r", Status: "ACTIVE"}); err != nil {
+			t.Fatalf("upsert %s: %v", sc, err)
+		}
+	}
+
+	// sw1 grouped; sw3 grouped but absent from the index (dormant); sw2 ungrouped.
+	groups := []model.ShareGroup{
+		{Name: "欧美剧", ShareCodes: []string{"sw1", "sw3"}},
+		{Name: "纪录片", ShareCodes: []string{}},
+	}
+	dormant, err := s.ApplyGroups(ctx, groups)
+	if err != nil {
+		t.Fatalf("ApplyGroups() error = %v", err)
+	}
+	if !reflect.DeepEqual(dormant, []string{"sw3"}) {
+		t.Fatalf("dormant = %v, want [sw3]", dormant)
+	}
+
+	var g1, g2 int
+	var sw1Group, sw2Group sql.NullInt64
+	mustScan(t, s, `SELECT group_id FROM share_group WHERE name='欧美剧'`, &g1)
+	mustScan(t, s, `SELECT group_id FROM share_group WHERE name='纪录片'`, &g2)
+	if g1 != 1 || g2 != 2 {
+		t.Fatalf("group ids = %d,%d, want 1,2", g1, g2)
+	}
+	mustScan(t, s, `SELECT group_id FROM share WHERE share_code='sw1'`, &sw1Group)
+	mustScan(t, s, `SELECT group_id FROM share WHERE share_code='sw2'`, &sw2Group)
+	if !sw1Group.Valid || sw1Group.Int64 != 1 {
+		t.Fatalf("sw1 group_id = %+v, want 1", sw1Group)
+	}
+	if sw2Group.Valid {
+		t.Fatalf("sw2 group_id = %+v, want NULL", sw2Group)
+	}
+}
+
+func TestApplyGroupsReappliesAndClearsRemovedMembers(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "r", Status: "ACTIVE"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyGroups(ctx, []model.ShareGroup{{Name: "欧美剧", ShareCodes: []string{"sw1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-apply with sw1 removed from all groups -> group_id must be NULL again.
+	if _, err := s.ApplyGroups(ctx, []model.ShareGroup{{Name: "其他", ShareCodes: []string{}}}); err != nil {
+		t.Fatal(err)
+	}
+	var g sql.NullInt64
+	mustScan(t, s, `SELECT group_id FROM share WHERE share_code='sw1'`, &g)
+	if g.Valid {
+		t.Fatalf("sw1 group_id = %+v, want NULL after re-apply", g)
+	}
+}
+
+func TestExportTrimmedRetainsShareGroup(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "r", Status: "ACTIVE"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyGroups(ctx, []model.ShareGroup{{Name: "欧美剧", ShareCodes: []string{"sw1"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, dest); err != nil {
+		t.Fatalf("ExportTrimmed() error = %v", err)
+	}
+	db, err := sql.Open("sqlite", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"share_group", "share", "file"} {
+		var n int
+		if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s`, table)).Scan(&n); err != nil {
+			t.Fatalf("trimmed db missing table %s: %v", table, err)
+		}
+	}
+	var hasCol int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('share') WHERE name='group_id'`).Scan(&hasCol); err != nil {
+		t.Fatal(err)
+	}
+	if hasCol != 1 {
+		t.Fatalf("trimmed share.group_id missing")
+	}
+}
+
+func openTestStore(t *testing.T) (*Store, func()) {
+	t.Helper()
+	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	return s, func() { _ = s.Close() }
+}
+
+func mustScan(t *testing.T, s *Store, query string, dest ...any) {
+	t.Helper()
+	if err := s.db.QueryRow(query).Scan(dest...); err != nil {
+		t.Fatalf("scan %q: %v", query, err)
 	}
 }

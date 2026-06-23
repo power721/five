@@ -160,6 +160,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			version INTEGER NOT NULL DEFAULT 0,
 			UNIQUE(share_code, receive_code)
 		);`,
+		`CREATE TABLE IF NOT EXISTS share_group (
+			group_id   INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			sort_order INTEGER NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS file (
 			file_id TEXT PRIMARY KEY,
 			share_code TEXT NOT NULL,
@@ -216,6 +221,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumns(ctx, "share", []columnDef{
 		{name: "share_title", ddl: "TEXT NOT NULL DEFAULT ''"},
 		{name: "file_size", ddl: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "group_id", ddl: "INTEGER"},
 	}); err != nil {
 		return fmt.Errorf("migrate share columns: %w", err)
 	}
@@ -625,6 +631,50 @@ func (s *Store) UpsertShare(ctx context.Context, share model.Share) error {
 		share.ShareCode, share.ReceiveCode, share.Status,
 		nullableInt64(share.LastCrawledAt), share.LastError, share.FailureCount, share.RetryAfterUnix, share.Version)
 	return err
+}
+
+// ApplyGroups reconciles the grouping overlay in a single transaction: it
+// replaces share_group with the given groups (slice order = group_id/sort_order,
+// 1-based) and reassigns each share's group_id by share_code match. group_id is
+// cleared for every share first, so shares absent from the overlay end up NULL.
+// A code that matches no share row is returned in dormant for the caller to warn
+// (it takes effect once that share is imported and ApplyGroups runs again).
+func (s *Store) ApplyGroups(ctx context.Context, groups []model.ShareGroup) (dormant []string, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM share_group;`); err != nil {
+		return nil, fmt.Errorf("clear share_group: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE share SET group_id = NULL;`); err != nil {
+		return nil, fmt.Errorf("clear share.group_id: %w", err)
+	}
+
+	for i, g := range groups {
+		groupID := int64(i + 1)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO share_group(group_id, name, sort_order) VALUES (?, ?, ?);`,
+			groupID, g.Name, groupID); err != nil {
+			return nil, fmt.Errorf("insert share_group %q: %w", g.Name, err)
+		}
+		for _, code := range g.ShareCodes {
+			res, err := tx.ExecContext(ctx, `UPDATE share SET group_id = ? WHERE share_code = ?;`, groupID, code)
+			if err != nil {
+				return nil, fmt.Errorf("set group_id for %s: %w", code, err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				dormant = append(dormant, code)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dormant, nil
 }
 
 // UpdateShareMeta records share metadata fetched from 115 (the share title and
