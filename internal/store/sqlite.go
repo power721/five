@@ -75,6 +75,8 @@ func (s *Store) ExportSnapshot(ctx context.Context, destPath string) error {
 // ExportTrimmed writes a single-file copy of the database containing only the
 // file and share tables (with their indexes), for shipping to consumers.
 // Crawler/indexer internals (checkpoints, events, manifest, kv) are excluded.
+// Shares marked DEAD (e.g. cancelled) and the files that belonged to them are
+// also dropped: a dead share's files are unreachable, so they must not ship.
 // destPath is overwritten if it exists; the result has no -wal/-shm sidecar.
 func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
 	if dir := filepath.Dir(destPath); dir != "" {
@@ -109,6 +111,16 @@ func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("trim %q: %w", stmt, err)
+		}
+	}
+	// Prune dead shares and the files that belonged to them before vacuuming.
+	// Order matters: files reference share_code, so delete them first.
+	for _, stmt := range []string{
+		`DELETE FROM file WHERE share_code IN (SELECT share_code FROM share WHERE status = 'DEAD');`,
+		`DELETE FROM share WHERE status = 'DEAD';`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("prune dead shares %q: %w", stmt, err)
 		}
 	}
 	if _, err := db.ExecContext(ctx, "VACUUM;"); err != nil {

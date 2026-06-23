@@ -2,8 +2,10 @@ package main
 
 import (
 	"archive/zip"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -28,7 +30,7 @@ func TestBuildPackageZipLayout(t *testing.T) {
 		t.Fatalf("open zip: %v", err)
 	}
 	defer zr.Close()
-	want := map[string]bool{"index.db": false, "bleve/index_meta.json": false, "bleve/store/seg": false}
+	want := map[string]bool{"index.db": false, "bleve/index_meta.json": false, "bleve/store/seg": false, "version.txt": false}
 	for _, f := range zr.File {
 		if _, ok := want[f.Name]; !ok {
 			t.Errorf("unexpected entry %q", f.Name)
@@ -40,6 +42,29 @@ func TestBuildPackageZipLayout(t *testing.T) {
 		if !found {
 			t.Errorf("missing entry %q", name)
 		}
+	}
+	// version.txt must hold the export timestamp, formatted YYYYMMDD-HHMMSS.
+	var vf *zip.File
+	for _, f := range zr.File {
+		if f.Name == "version.txt" {
+			vf = f
+			break
+		}
+	}
+	if vf == nil {
+		t.Fatalf("version.txt entry not found")
+	}
+	rc, err := vf.Open()
+	if err != nil {
+		t.Fatalf("open version.txt: %v", err)
+	}
+	body, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("read version.txt: %v", err)
+	}
+	if !regexp.MustCompile(`^\d{8}-\d{6}$`).Match(body) {
+		t.Errorf("version.txt = %q, want YYYYMMDD-HHMMSS", string(body))
 	}
 }
 

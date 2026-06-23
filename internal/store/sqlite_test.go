@@ -801,3 +801,67 @@ func TestExportTrimmedKeepsOnlyFileAndShare(t *testing.T) {
 		t.Fatalf("file indexes = %d, want 4", idx)
 	}
 }
+
+func TestExportTrimmedPrunesDeadSharesAndTheirFiles(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// An alive share with a file — must survive the export.
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "rc1"}); err != nil {
+		t.Fatalf("upsert share sw1: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files sw1: %v", err)
+	}
+	// A dead (cancelled) share with two files — share and files must be pruned.
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw2", ReceiveCode: "rc2"}); err != nil {
+		t.Fatalf("upsert share sw2: %v", err)
+	}
+	if err := s.MarkShareDead(ctx, "sw2", "DEAD_SHARE: 分享已取消"); err != nil {
+		t.Fatalf("mark share dead: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f2", ShareCode: "sw2", ParentID: "0", Name: "b.mkv", Ext: "mkv", CrawledAt: 1},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Ext: "mkv", CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files sw2: %v", err)
+	}
+
+	trimmed := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, trimmed); err != nil {
+		t.Fatalf("export trimmed: %v", err)
+	}
+	s.Close()
+
+	db, err := sql.Open("sqlite", trimmed)
+	if err != nil {
+		t.Fatalf("open trimmed: %v", err)
+	}
+	defer db.Close()
+
+	var shares int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM share").Scan(&shares)
+	if shares != 1 {
+		t.Fatalf("shares = %d, want 1 (dead share must be pruned)", shares)
+	}
+	var deadCode string
+	db.QueryRowContext(ctx, "SELECT share_code FROM share").Scan(&deadCode)
+	if deadCode != "sw1" {
+		t.Fatalf("remaining share = %q, want sw1", deadCode)
+	}
+
+	var files int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM file").Scan(&files)
+	if files != 1 {
+		t.Fatalf("files = %d, want 1 (dead share's files must be pruned)", files)
+	}
+	var fileID string
+	db.QueryRowContext(ctx, "SELECT file_id FROM file").Scan(&fileID)
+	if fileID != "f1" {
+		t.Fatalf("remaining file = %q, want f1", fileID)
+	}
+}

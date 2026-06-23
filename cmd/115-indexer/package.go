@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-// buildPackage writes zipDestPath containing index.db (from trimmedDBPath) and
-// the contents of bleveSrcDir under "bleve/". Flat layout: extracts to
-// <dir>/index.db + <dir>/bleve/.
+// buildPackage writes zipDestPath containing index.db (from trimmedDBPath), the
+// contents of bleveSrcDir under "bleve/", and a version.txt holding the export
+// timestamp (format 20060102-150405). Flat layout: extracts to
+// <dir>/index.db + <dir>/bleve/ + <dir>/version.txt.
 func buildPackage(trimmedDBPath, bleveSrcDir, zipDestPath string) error {
 	if dir := filepath.Dir(zipDestPath); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -44,6 +46,22 @@ func buildPackage(trimmedDBPath, bleveSrcDir, zipDestPath string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("walk bleve: %w", err)
+	}
+	if err := addVersionToZip(zw, time.Now()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// addVersionToZip writes version.txt containing the export timestamp, formatted
+// as YYYYMMDD-HHMMSS (e.g. 20260623-084025).
+func addVersionToZip(zw *zip.Writer, now time.Time) error {
+	w, err := zw.Create("version.txt")
+	if err != nil {
+		return fmt.Errorf("add version.txt: %w", err)
+	}
+	if _, err := w.Write([]byte(now.Format("20060102-150405"))); err != nil {
+		return fmt.Errorf("write version.txt: %w", err)
 	}
 	return nil
 }
