@@ -35,8 +35,6 @@ func main() {
 		cookie            = flag.String("cookie", "", "115 cookie header value")
 		userAgent         = flag.String("user-agent", "Mozilla/5.0", "http user-agent")
 		schedulerInterval = flag.Duration("scheduler-interval", time.Minute, "scheduler polling interval")
-		indexInterval     = flag.Duration("index-interval", 30*time.Second, "incremental index polling interval")
-		indexBatchSize    = flag.Int("index-batch-size", 100, "incremental index batch size")
 		proxyKey          = flag.String("proxy-key", "", "proxy provider key")
 		proxyPassword     = flag.String("proxy-password", "", "proxy provider password")
 		envFile           = flag.String("env-file", defaultEnvFile, "optional env file path for credentials")
@@ -225,21 +223,13 @@ func main() {
 		}
 		fmt.Fprintln(os.Stdout, "scheduler run completed")
 	case "daemon":
+		// The daemon only crawls and schedules; it intentionally does NOT build or
+		// maintain the bleve search index. The index is rebuilt locally via
+		// rebuild-index and published separately. Running the index event loop here
+		// left index_event rows queued forever, and a missing bleve dir made
+		// bleve.Open fail and took the whole daemon down on startup — so the daemon
+		// must not depend on the bleve path existing at all.
 		reg := metrics.New()
-		builder := searchindex.New(*blevePath)
-		manifest, ok, err := s.LoadManifest(ctx)
-		if err != nil {
-			log.Fatalf("load manifest: %v", err)
-		}
-		if !ok {
-			manifest, err = builder.Rebuild(ctx, s, time.Now().Unix(), time.Now().Unix())
-			if err != nil {
-				log.Fatalf("bootstrap rebuild index: %v", err)
-			}
-			if err := s.UpdateManifest(ctx, manifest); err != nil {
-				log.Fatalf("update manifest: %v", err)
-			}
-		}
 		proxyMgr := proxy.New(proxy.Config{})
 		proxyProvider := newProxyProvider(proxyCfg)
 		validator := &proxy.HTTPValidator{
@@ -257,10 +247,8 @@ func main() {
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
 		sched := scheduler.New(s, c, log.Writer())
 		log.Printf(
-			"event=daemon_start scheduler_interval=%s index_interval=%s index_batch_size=%d proxy_enabled=%t admin_addr=%q metrics_addr=%q",
+			"event=daemon_start scheduler_interval=%s proxy_enabled=%t admin_addr=%q metrics_addr=%q",
 			pollInterval(*schedulerInterval, time.Minute),
-			pollInterval(*indexInterval, 30*time.Second),
-			*indexBatchSize,
 			proxyMgr != nil,
 			localOnlyListenAddr(*adminAddr),
 			*metricsAddr,
@@ -270,10 +258,6 @@ func main() {
 			func(ctx context.Context) error {
 				reg.IncCounter("daemon_scheduler_loops_total", 1)
 				return sched.RunLoop(ctx, pollInterval(*schedulerInterval, time.Minute))
-			},
-			func(ctx context.Context) error {
-				reg.IncCounter("daemon_index_loops_total", 1)
-				return builder.RunEventLoop(ctx, manifest.IndexPath, s, *indexBatchSize, pollInterval(*indexInterval, 30*time.Second))
 			},
 		)
 		if *metricsAddr != "" {
