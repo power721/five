@@ -38,6 +38,13 @@ var (
 	eventRetryMaxBackoff = time.Minute
 )
 
+// rebuildBatchSize caps how many documents accumulate in a bleve batch before
+// Rebuild flushes it. Rebuild formerly indexed the entire corpus into a single
+// in-memory batch and committed once; at ~1.2M files that peaked at multiple GB
+// and the process was OOM-killed ("signal: killed"). Flushing every N docs keeps
+// peak memory bounded to one chunk. Package-level var so tests can shrink it.
+var rebuildBatchSize = 2000
+
 type searchDoc struct {
 	FileID    string `json:"file_id"`
 	ShareCode string `json:"share_code"`
@@ -77,7 +84,24 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 		return model.IndexManifest{}, err
 	}
 
+	// Index in bounded batches instead of one giant in-memory batch. The whole
+	// corpus formerly accumulated in a single bleve.Batch before a single commit,
+	// which peaked at multiple GB and got OOM-killed on large indexes. Flushing
+	// every rebuildBatchSize docs caps peak memory at one chunk; the trailing
+	// partial batch is flushed after the loop.
 	batch := index.NewBatch()
+	var pending int
+	flush := func() error {
+		if pending == 0 {
+			return nil
+		}
+		if err := index.Batch(batch); err != nil {
+			return err
+		}
+		batch.Reset()
+		pending = 0
+		return nil
+	}
 	for _, f := range files {
 		doc := searchDoc{
 			FileID:    f.FileID,
@@ -90,8 +114,15 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 			index.Close()
 			return model.IndexManifest{}, err
 		}
+		pending++
+		if pending >= rebuildBatchSize {
+			if err := flush(); err != nil {
+				index.Close()
+				return model.IndexManifest{}, err
+			}
+		}
 	}
-	if err := index.Batch(batch); err != nil {
+	if err := flush(); err != nil {
 		index.Close()
 		return model.IndexManifest{}, err
 	}

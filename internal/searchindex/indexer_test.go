@@ -3,6 +3,7 @@ package searchindex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,50 @@ func TestRebuildCreatesSearchableIndexAndManifest(t *testing.T) {
 	}
 	if res.Total != 1 {
 		t.Fatalf("search total = %d, want 1", res.Total)
+	}
+}
+
+// TestRebuildFlushesBoundedBatchesAcrossRemainder guards the chunked-flush path
+// in Rebuild: with a small batch size and a doc count that is NOT a multiple of
+// it (7 + 7 + 3), every document must still land in the index. A naive "flush
+// only when full" implementation drops the trailing partial batch and fails
+// here. (Rebuild formerly held the whole corpus in one batch and got
+// OOM-killed at ~1.2M files; this test pins the bounded-batch refactor.)
+func TestRebuildFlushesBoundedBatchesAcrossRemainder(t *testing.T) {
+	prev := rebuildBatchSize
+	rebuildBatchSize = 7
+	defer func() { rebuildBatchSize = prev }()
+
+	const n = 17
+	files := make([]model.File, 0, n)
+	for i := 0; i < n; i++ {
+		files = append(files, model.File{
+			FileID:    fmt.Sprintf("f%d", i),
+			ShareCode: "sw1",
+			Name:      fmt.Sprintf("movie-%d.mkv", i),
+			Ext:       "mkv",
+		})
+	}
+
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	manifest, err := builder.Rebuild(context.Background(), staticProvider{files: files}, 1, 1)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	index, err := bleve.Open(manifest.IndexPath)
+	if err != nil {
+		t.Fatalf("open bleve: %v", err)
+	}
+	defer index.Close()
+
+	count, err := index.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != uint64(n) {
+		t.Fatalf("doc count = %d, want %d (trailing partial batch must be flushed)", count, n)
 	}
 }
 
