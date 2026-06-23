@@ -31,6 +31,7 @@ func main() {
 		receiveCode       = flag.String("receive-code", "", "115 receive code")
 		shareURL          = flag.String("share-url", "", "115 share URL, e.g. https://115.com/s/<share>?password=<code>")
 		sharesFile        = flag.String("shares-file", "115_shares.txt", "shares file path for import-shares mode")
+		groupsFile        = flag.String("groups-file", "115_groups.txt", "groups overlay file path for import-groups mode")
 		cookie            = flag.String("cookie", "", "115 cookie header value")
 		userAgent         = flag.String("user-agent", "Mozilla/5.0", "http user-agent")
 		schedulerInterval = flag.Duration("scheduler-interval", time.Minute, "scheduler polling interval")
@@ -127,6 +128,27 @@ func main() {
 			}
 		}
 		fmt.Fprintf(os.Stdout, "imported %d shares\n", len(parsed))
+	case "import-groups":
+		f, err := os.Open(*groupsFile)
+		if err != nil {
+			log.Fatalf("open groups file: %v", err)
+		}
+		defer f.Close()
+		groups, dups, err := shares.ParseGroups(f)
+		if err != nil {
+			log.Fatalf("parse groups file: %v", err)
+		}
+		for _, code := range dups {
+			log.Printf("warn: share %s appears in more than one group; last assignment wins", code)
+		}
+		dormant, err := s.ApplyGroups(ctx, groups)
+		if err != nil {
+			log.Fatalf("apply groups: %v", err)
+		}
+		for _, code := range dormant {
+			log.Printf("warn: share %s is grouped but not present in the index (dormant)", code)
+		}
+		fmt.Fprintf(os.Stdout, "applied %d groups\n", len(groups))
 	case "backfill-share-meta":
 		f, err := os.Open(*sharesFile)
 		if err != nil {
