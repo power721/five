@@ -21,8 +21,12 @@ The consumer homepage lists every indexed share flat. With hundreds of shares th
 ```
 
 - `# <name>` lines = group headers.
-- `<title>\t<115-url>` lines = a share in the *current* group. **Only the share code is used** (parsed from the URL); title and receive_code are ignored (the receive_code already lives in `115_shares.txt`).
-- URL form `https://115.com/s/<code>?password=<receive>` is already handled by `shares.ParseURL`; trailing `&#`/`#` fall into the URL fragment and do not affect parsing.
+- Each share line carries one share identifier in the *current* group. A leading title column is **optional**. The identifier may be any of:
+  - bare code: `sw68wz93ncb`
+  - token: `swnsdrk3h2m?password=p783`
+  - URL: `https://115.com/s/swXXX?password=YYY` or `https://115cdn.com/s/swXXX?password=YYY`
+  When a title is present (`美剧【…】\t<id>`), the identifier is the **last whitespace-separated field**; otherwise the whole line is the identifier.
+- Only the share code is used; title and receive_code are ignored. `shares.ParseURL` is host-agnostic (115.com or 115cdn.com both yield `/s/<code>`); trailing `&#`/`#` fall into the URL fragment and do not affect parsing.
 
 ## Locked decisions
 
@@ -91,8 +95,8 @@ func ParseGroups(r io.Reader) ([]Group, error)
 ```
 
 - `# <name>` line → start a new group (header order = output/sort order).
-- `<title>\t<url>` line → `shares.ParseURL(url)`; append its `ShareCode` to the current group. Title and receive_code ignored.
-- A `share_code` appearing in two groups → last wins; return the duplicate so the caller can warn.
+- Share line → take the **last whitespace-separated field** (or the whole line if there is only one) and extract the share code via a new `parseShareCode` helper that handles bare code, `code?password=…` token, and `http(s)://host/s/<code>` URL (any host). Append to the current group.
+- A `share_code` appearing in two groups → last wins (removed from the earlier group); returned in `duplicates` for the caller to warn.
 
 ### Apply — new `import-groups` mode + `-groups-file` flag (`cmd/115-indexer/main.go`)
 
@@ -153,7 +157,7 @@ JSON handler (`server/handles/index115.go`) and driver: **no change** — they p
 
 ## Testing
 
-- `shares.ParseGroups`: grouped file (header + url lines), duplicate-in-two-groups, trailing `&#`/`#` URLs, ignored title/receive_code; `shares.Parse` regression (115_shares.txt still parses).
+- `shares.ParseGroups`: header + share lines in all identifier forms (bare code, `code?password=` token, `115.com` and `115cdn.com` URLs, with and without title column), duplicate-in-two-groups (last wins), trailing `&#`/`#` URLs; `shares.Parse` regression (115_shares.txt still parses).
 - Store migrate: `share_group` + `share.group_id` created; `ExportTrimmed` retains both (assert tables present in trimmed output).
 - `import-groups` apply: upserts `share_group`, sets `share.group_id` by share_code, NULLs removed members, warns on absent codes.
 - Consumer `Browse`: homepage returns groups (ordered) + loose; `grp<N>` returns only that group's members; real share unchanged; `RefreshShares` populates `shareGroup`.
