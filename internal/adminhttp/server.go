@@ -22,6 +22,7 @@ type Store interface {
 	CountPendingIndexEvents(ctx context.Context) (int, error)
 	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
+	ReactivateShare(ctx context.Context, shareCode string) (bool, error)
 }
 
 type StatusResponse struct {
@@ -202,11 +203,16 @@ func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
+	rest := r.URL.Path[len("/shares/"):]
+	if code, ok := strings.CutSuffix(rest, "/reactivate"); ok {
+		s.handleShareReactivate(w, r, code)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	shareCode := r.URL.Path[len("/shares/"):]
+	shareCode := rest
 	share, ok, err := s.store.GetShare(r.Context(), shareCode)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -235,6 +241,28 @@ func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
 		progress.ActiveCID = cp.CID
 	}
 	writeJSON(w, http.StatusOK, progress)
+}
+
+func (s *Server) handleShareReactivate(w http.ResponseWriter, r *http.Request, shareCode string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if shareCode == "" {
+		http.Error(w, "share code required", http.StatusBadRequest)
+		return
+	}
+	ok, err := s.store.ReactivateShare(r.Context(), shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.logger.Printf("event=share_reactivated share=%s", shareCode)
+	writeJSON(w, http.StatusOK, map[string]string{"share_code": shareCode, "status": "ACTIVE"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

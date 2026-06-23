@@ -19,6 +19,7 @@ type Registry interface {
 	MarkShareCrawled(ctx context.Context, shareCode string, crawledAt int64) error
 	RecordShareFailure(ctx context.Context, shareCode, errText string) error
 	MarkShareDead(ctx context.Context, shareCode, errText string) error
+	MarkShareShelved(ctx context.Context, shareCode, errText string) error
 }
 
 type Runner interface {
@@ -66,12 +67,27 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 			}
 			s.logger.Printf("event=share_crawl_finished share=%s result=dead error=%q", share.ShareCode, err.Error())
 		default:
-			if err := s.registry.RecordShareFailure(ctx, share.ShareCode, err.Error()); err != nil {
-				return false, err
-			}
-			s.logger.Printf("event=share_crawl_finished share=%s result=failure error=%q", share.ShareCode, err.Error())
-			if !api115.IsProxyFailure(err) {
+			if api115.IsEmptyDataError(err) && share.FailureCount+1 >= emptyDataGiveUpFailures {
+				// "empty data with nonzero count" is retryable in case a cookie
+				// refresh clears it, but for some shares 115 never returns data.
+				// After a few tries, shelve the share so the scheduler stops
+				// re-queuing it every backoff cycle and moves on to other shares.
+				// We shelve (keep QUARANTINE + far-future retry) rather than mark
+				// DEAD: these shares may still hold previously-crawled files, and
+				// DEAD shares are pruned with their files at export time.
+				if err := s.registry.MarkShareShelved(ctx, share.ShareCode, err.Error()); err != nil {
+					return false, err
+				}
+				s.logger.Printf("event=share_crawl_finished share=%s result=shelved reason=empty_data_persistent failures=%d error=%q", share.ShareCode, share.FailureCount+1, err.Error())
 				proxyFailureOnly = false
+			} else {
+				if err := s.registry.RecordShareFailure(ctx, share.ShareCode, err.Error()); err != nil {
+					return false, err
+				}
+				s.logger.Printf("event=share_crawl_finished share=%s result=failure error=%q", share.ShareCode, err.Error())
+				if !api115.IsProxyFailure(err) {
+					proxyFailureOnly = false
+				}
 			}
 		}
 	}
@@ -110,6 +126,13 @@ func (s *Scheduler) RunLoop(ctx context.Context, interval time.Duration) error {
 		}
 	}
 }
+
+// emptyDataGiveUpFailures caps how many times a share is retried for the
+// "empty data with nonzero count" snap error before the scheduler abandons it
+// (MarkShareDead). For some shares 115 never returns data even though count>0,
+// so retrying forever — the old behavior — burned every backoff cycle on shares
+// that would never succeed. Package-level var so tests can shrink it.
+var emptyDataGiveUpFailures = 4
 
 func proxyBackoff(consecutiveFailures int) time.Duration {
 	switch {

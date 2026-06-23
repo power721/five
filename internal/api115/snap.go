@@ -268,7 +268,7 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 		return SnapResponse{}, err
 	}
 	if err := ClassifySnapError(out); err != nil {
-		if strings.Contains(err.Error(), "empty data with nonzero count") {
+		if IsEmptyDataError(err) {
 			c.clearCookies()
 		}
 		return SnapResponse{}, err

@@ -27,6 +27,7 @@ type fakeStore struct {
 	listSharesErr  error
 	allFilesErr    error
 	eventsErr      error
+	reactivated    []string
 }
 
 func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
@@ -83,6 +84,64 @@ func (f *fakeStore) GetShare(_ context.Context, shareCode string) (model.Share, 
 func (f *fakeStore) LoadCheckpoint(_ context.Context, shareCode string) (model.Checkpoint, bool, error) {
 	cp, ok := f.checkpoints[shareCode]
 	return cp, ok, nil
+}
+
+func (f *fakeStore) ReactivateShare(_ context.Context, shareCode string) (bool, error) {
+	for i, share := range f.shares {
+		if share.ShareCode == shareCode {
+			f.shares[i].Status = "ACTIVE"
+			f.shares[i].FailureCount = 0
+			f.shares[i].RetryAfterUnix = 0
+			f.shares[i].LastError = ""
+			f.reactivated = append(f.reactivated, shareCode)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func TestServerReactivateShare(t *testing.T) {
+	store := &fakeStore{
+		shares: []model.Share{
+			{ShareCode: "sw1", Status: "QUARANTINE", FailureCount: 9, RetryAfterUnix: 9999999999, LastError: "empty data"},
+		},
+	}
+	srv := New(store, &bytes.Buffer{})
+
+	req := httptest.NewRequest(http.MethodPost, "/shares/sw1/reactivate", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.reactivated) != 1 || store.reactivated[0] != "sw1" {
+		t.Fatalf("reactivated = %#v, want [sw1]", store.reactivated)
+	}
+	if store.shares[0].Status != "ACTIVE" || store.shares[0].FailureCount != 0 || store.shares[0].RetryAfterUnix != 0 {
+		t.Fatalf("share not reset: %+v", store.shares[0])
+	}
+
+	// Unknown share -> 404.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/shares/nope/reactivate", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown share status = %d, want 404", rr.Code)
+	}
+
+	// Detail GET still works (routing must not swallow it).
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail GET status = %d, want 200", rr.Code)
+	}
+
+	// Wrong method on reactivate -> 405.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1/reactivate", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET reactivate status = %d, want 405", rr.Code)
+	}
 }
 
 func TestStatusReturnsShareFileAndEventCounts(t *testing.T) {

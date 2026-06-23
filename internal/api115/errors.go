@@ -72,6 +72,15 @@ func IsDeadShare(err error) bool {
 	return errors.Is(err, ErrDeadShare)
 }
 
+// IsEmptyDataError reports whether err is the "empty data with nonzero count"
+// snap error: 115 reported a positive file count but returned no list. It is
+// classified retryable because a stale cookie can cause it (callers refresh the
+// cookie and retry), but for some shares 115 never returns data, so callers cap
+// retries on it instead of retrying forever.
+func IsEmptyDataError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "empty data with nonzero count")
+}
+
 func ClassifyHTTPError(statusCode int, cause error) error {
 	switch statusCode {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:

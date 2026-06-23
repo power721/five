@@ -17,6 +17,7 @@ type registryStore struct {
 	markedCrawled []string
 	markedFailed  []string
 	markedDead    []string
+	markedShelved []string
 }
 
 func (r *registryStore) ListSharesForCrawl(_ context.Context, _ int64) ([]model.Share, error) {
@@ -35,6 +36,11 @@ func (r *registryStore) RecordShareFailure(_ context.Context, shareCode, _ strin
 
 func (r *registryStore) MarkShareDead(_ context.Context, shareCode, _ string) error {
 	r.markedDead = append(r.markedDead, shareCode)
+	return nil
+}
+
+func (r *registryStore) MarkShareShelved(_ context.Context, shareCode, _ string) error {
+	r.markedShelved = append(r.markedShelved, shareCode)
 	return nil
 }
 
@@ -99,6 +105,73 @@ func TestSchedulerRunOnceMarksSuccessFailureAndDead(t *testing.T) {
 	}
 }
 
+func TestSchedulerAbandonsShareAfterEmptyDataRetries(t *testing.T) {
+	// FailureCount one below the give-up threshold: this failed crawl is the one
+	// that abandons the share instead of recording another retryable failure.
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "stuck", ReceiveCode: "a", FailureCount: emptyDataGiveUpFailures - 1},
+		},
+	}
+	emptyErr := api115.WrapError(api115.KindRetryable, "empty data with nonzero count", 0, nil)
+	s := New(store, crawlRunner{err: emptyErr}, nil)
+	proxyFailureOnly, err := s.RunOnce(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if proxyFailureOnly {
+		t.Fatal("empty-data abandonment must not be reported as proxy failure only")
+	}
+	if len(store.markedShelved) != 1 || store.markedShelved[0] != "stuck" {
+		t.Fatalf("expected share stuck shelved, got markedShelved=%#v", store.markedShelved)
+	}
+	if len(store.markedDead) != 0 {
+		t.Fatalf("empty-data give-up must not mark DEAD (would prune files), got markedDead=%#v", store.markedDead)
+	}
+	if len(store.markedFailed) != 0 {
+		t.Fatalf("expected no retryable failure recorded, got markedFailed=%#v", store.markedFailed)
+	}
+}
+
+func TestSchedulerRetriesEmptyDataBelowThreshold(t *testing.T) {
+	// First empty-data failure must still go through the normal retry path.
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "fresh", ReceiveCode: "a", FailureCount: 0},
+		},
+	}
+	emptyErr := api115.WrapError(api115.KindRetryable, "empty data with nonzero count", 0, nil)
+	s := New(store, crawlRunner{err: emptyErr}, nil)
+	if _, err := s.RunOnce(context.Background(), 1); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if len(store.markedFailed) != 1 || store.markedFailed[0] != "fresh" {
+		t.Fatalf("expected fresh share recorded as retryable failure, got markedFailed=%#v", store.markedFailed)
+	}
+	if len(store.markedDead) != 0 {
+		t.Fatalf("expected no abandonment below threshold, got markedDead=%#v", store.markedDead)
+	}
+}
+
+func TestSchedulerDoesNotAbandonOtherErrorsAtThreshold(t *testing.T) {
+	// A high failure count on a non-empty-data error must keep retrying, not abandon.
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "flaky", ReceiveCode: "a", FailureCount: 10},
+		},
+	}
+	s := New(store, crawlRunner{err: errors.New("timeout")}, nil)
+	if _, err := s.RunOnce(context.Background(), 1); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if len(store.markedFailed) != 1 || store.markedFailed[0] != "flaky" {
+		t.Fatalf("expected flaky share recorded as failure (keep retrying), got markedFailed=%#v", store.markedFailed)
+	}
+	if len(store.markedDead) != 0 {
+		t.Fatalf("expected no abandonment for non-empty-data error, got markedDead=%#v", store.markedDead)
+	}
+}
+
 type emptyRegistry struct{}
 
 func (emptyRegistry) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
@@ -107,6 +180,7 @@ func (emptyRegistry) ListSharesForCrawl(context.Context, int64) ([]model.Share, 
 func (emptyRegistry) MarkShareCrawled(context.Context, string, int64) error    { return nil }
 func (emptyRegistry) RecordShareFailure(context.Context, string, string) error { return nil }
 func (emptyRegistry) MarkShareDead(context.Context, string, string) error      { return nil }
+func (emptyRegistry) MarkShareShelved(context.Context, string, string) error   { return nil }
 
 type countingRunner struct {
 	calls *atomic.Int32
