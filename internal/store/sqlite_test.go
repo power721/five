@@ -14,6 +14,16 @@ import (
 	"five/internal/model"
 )
 
+// enableIndexEventsForTest turns the (production-off) indexEventsEnabled gate
+// back on for tests that exercise UpsertFiles' event-queueing path, restoring it
+// when the test ends.
+func enableIndexEventsForTest(t *testing.T) {
+	t.Helper()
+	prev := indexEventsEnabled
+	indexEventsEnabled = true
+	t.Cleanup(func() { indexEventsEnabled = prev })
+}
+
 func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -23,6 +33,7 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	enableIndexEventsForTest(t)
 
 	now := time.Now().Unix()
 	files := []model.File{
@@ -136,6 +147,7 @@ func TestSQLiteStoreDoesNotQueueIndexEventsForUnchangedFiles(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	enableIndexEventsForTest(t)
 
 	now := time.Now().Unix()
 	files := []model.File{
@@ -167,6 +179,7 @@ func TestSQLiteStoreDoesNotQueueDuplicatePendingUpsertEvents(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	enableIndexEventsForTest(t)
 
 	now := time.Now().Unix()
 	file := model.File{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: now}
@@ -223,6 +236,57 @@ func TestSQLiteStoreCoalescesExistingPendingUpsertEventsOnOpen(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorePurgesAbandonedIndexEvents(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	// Open already ran purge once on the empty table and armed the gate. Reset the
+	// gate so the purge path can be exercised directly, then seed a backlog.
+	if err := s.DeleteKV(ctx, "index_events_purged"); err != nil {
+		t.Fatalf("reset gate: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES ('f1','upsert',1),('f2','upsert',2)`); err != nil {
+		t.Fatalf("seed backlog: %v", err)
+	}
+
+	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("index_event count after purge = %d, want 0", n)
+	}
+	got, ok, err := s.LoadKV(ctx, "index_events_purged")
+	if err != nil {
+		t.Fatalf("load gate: %v", err)
+	}
+	if !ok || got != "1" {
+		t.Fatalf("purge gate = %q ok=%v, want \"1\"", got, ok)
+	}
+
+	// Once gated, purge must not re-run: newly seeded rows survive a second call.
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES ('f3','upsert',3)`); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
+		t.Fatalf("second purge: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event`).Scan(&n); err != nil {
+		t.Fatalf("count after gated purge: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("index_event count after gated purge = %d, want 1 (gate must block re-purge)", n)
+	}
+}
+
 func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -232,6 +296,7 @@ func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	enableIndexEventsForTest(t)
 
 	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "pw1", Status: "ACTIVE"}); err != nil {
 		t.Fatalf("upsert first share: %v", err)

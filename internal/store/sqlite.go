@@ -225,6 +225,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("migrate share columns: %w", err)
 	}
+	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
+		return fmt.Errorf("purge abandoned index events: %w", err)
+	}
 	if err := s.coalescePendingIndexEvents(ctx); err != nil {
 		return fmt.Errorf("coalesce pending index events: %w", err)
 	}
@@ -232,6 +235,23 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("drop legacy columns: %w", err)
 	}
 	return nil
+}
+
+// purgeAbandonedIndexEvents clears the incremental-index event backlog exactly
+// once. The daemon no longer consumes these events (the index is rebuilt
+// locally), and generation is gated off, so any pre-existing rows are orphaned.
+// Gated by kv so it runs only on the first open of a given database after this
+// change; afterwards the table stays empty and this is a cheap no-op skip.
+func (s *Store) purgeAbandonedIndexEvents(ctx context.Context) error {
+	if _, ok, err := s.LoadKV(ctx, "index_events_purged"); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM index_event;`); err != nil {
+		return err
+	}
+	return s.SaveKV(ctx, "index_events_purged", "1")
 }
 
 // dropLegacyColumns removes columns that were dropped from the schema. SQLite
@@ -351,6 +371,15 @@ func (s *Store) coalescePendingIndexEvents(ctx context.Context) error {
 	return err
 }
 
+// indexEventsEnabled gates whether UpsertFiles queues incremental index_event
+// rows. It is OFF in production: the daemon no longer runs the index event loop
+// (it could not keep up with crawl throughput at this scale, so pending events
+// grew without ever being drained), and the search index is rebuilt locally via
+// rebuild-index instead. The generation path is retained and exercised by tests
+// that flip this on, so the capability can be re-enabled if incremental indexing
+// is revisited. Package-level var (not const) so tests can toggle it.
+var indexEventsEnabled = false
+
 func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -384,9 +413,15 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 		if f.IsDir {
 			isDir = 1
 		}
-		needsIndexEvent, err := shouldQueueIndexEvent(ctx, tx, currentStmt, f, isDir)
-		if err != nil {
-			return err
+		// Detect a change against the PRE-upsert row (must run before the upsert
+		// below, otherwise the just-written row matches f and nothing ever queues).
+		var needsIndexEvent bool
+		if indexEventsEnabled {
+			changed, err := shouldQueueIndexEvent(ctx, tx, currentStmt, f, isDir)
+			if err != nil {
+				return err
+			}
+			needsIndexEvent = changed
 		}
 		if _, err := tx.ExecContext(ctx, upsertStmt,
 			f.FileID, f.ShareCode, f.ParentID, f.Name, f.Ext, f.Size, isDir, f.Depth, f.SHA1, f.UpdatedAt, f.CrawledAt,
