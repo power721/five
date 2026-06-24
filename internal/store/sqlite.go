@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,8 +166,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			name       TEXT NOT NULL,
 			sort_order INTEGER NOT NULL
 		);`,
+		// PRIMARY KEY is (share_code, file_id), NOT file_id alone: the 115 cid is
+		// unique within a share but NOT globally — the same folder shared via
+		// multiple share links reuses one root cid. Keying on file_id alone let a
+		// later crawl of a duplicate share steal the earlier share's root row.
 		`CREATE TABLE IF NOT EXISTS file (
-			file_id TEXT PRIMARY KEY,
+			file_id TEXT NOT NULL,
 			share_code TEXT NOT NULL,
 			parent_id TEXT NOT NULL,
 			name TEXT NOT NULL,
@@ -176,7 +181,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			depth INTEGER NOT NULL DEFAULT 0,
 			sha1 TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER,
-			crawled_at INTEGER NOT NULL
+			crawled_at INTEGER NOT NULL,
+			PRIMARY KEY (share_code, file_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
@@ -234,7 +240,122 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.dropLegacyColumns(ctx); err != nil {
 		return fmt.Errorf("drop legacy columns: %w", err)
 	}
+	if err := s.migrateFileCompositePK(ctx); err != nil {
+		return fmt.Errorf("migrate file composite pk: %w", err)
+	}
+	if err := s.repairStolenRoots(ctx); err != nil {
+		return fmt.Errorf("repair stolen roots: %w", err)
+	}
 	return nil
+}
+
+// filePKColumnCount reports how many columns the file table's primary key spans.
+// Pre-fix databases keyed on file_id alone (1); the current schema keys on
+// (share_code, file_id) (2). Used to decide whether the table needs rebuilding.
+func (s *Store) filePKColumnCount(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(file)`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notNull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return 0, err
+		}
+		if pk > 0 {
+			count++
+		}
+	}
+	return count, rows.Err()
+}
+
+// migrateFileCompositePK rebuilds an existing file table that still keys on
+// file_id alone (pre-fix databases) to the composite (share_code, file_id) key.
+// Fresh databases already get the composite PK from the CREATE TABLE DDL, so
+// this is a no-op for them. SQLite cannot ALTER a primary key in place, so the
+// table is copied, dropped and renamed inside one transaction; indexes are
+// recreated afterwards.
+func (s *Store) migrateFileCompositePK(ctx context.Context) error {
+	count, err := s.filePKColumnCount(ctx)
+	if err != nil {
+		return err
+	}
+	if count >= 2 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE file_new (
+			file_id TEXT NOT NULL,
+			share_code TEXT NOT NULL,
+			parent_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			ext TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			is_dir INTEGER NOT NULL DEFAULT 0,
+			depth INTEGER NOT NULL DEFAULT 0,
+			sha1 TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER,
+			crawled_at INTEGER NOT NULL,
+			PRIMARY KEY (share_code, file_id)
+		);`,
+		`INSERT INTO file_new (file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at, crawled_at)
+			SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at, crawled_at FROM file;`,
+		`DROP TABLE file;`,
+		`ALTER TABLE file_new RENAME TO file;`,
+		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("rebuild file pk: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// repairStolenRoots clones the missing root row back under every "victim" share
+// in databases built before the composite-PK fix. A victim is a share that has
+// file rows but no parent_id='0' row, because its root cid was stolen by another
+// share under the old file_id-only key. The root's metadata is identical for
+// every share linking the same folder, so cloning the holder's root row is
+// correct. Idempotent (guarded by WHERE NOT EXISTS) and gated by kv so it runs
+// once; on healthy/fresh databases the INSERT affects zero rows but still arms
+// the gate. A victim whose stolen root no longer exists under any share (e.g.
+// the holder was pruned) is left untouched here and needs a re-crawl.
+func (s *Store) repairStolenRoots(ctx context.Context) error {
+	if done, ok, err := s.LoadKV(ctx, "file_stolen_roots_repaired"); err != nil {
+		return err
+	} else if ok && done == "1" {
+		return nil
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO file (file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at, crawled_at)
+SELECT src.file_id, victim.share_code, src.parent_id, src.name, src.ext, src.size, src.is_dir, src.depth, src.sha1, src.updated_at, src.crawled_at
+FROM (SELECT DISTINCT share_code, parent_id AS cid FROM file WHERE parent_id <> '0') victim
+JOIN file src ON src.file_id = victim.cid AND src.parent_id = '0'
+WHERE NOT EXISTS (SELECT 1 FROM file own WHERE own.share_code = victim.share_code AND own.parent_id = '0')
+  AND NOT EXISTS (SELECT 1 FROM file already WHERE already.share_code = victim.share_code AND already.file_id = victim.cid);`)
+	if err != nil {
+		return fmt.Errorf("clone stolen roots: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("event=file_stolen_roots_repaired count=%d", n)
+	}
+	return s.SaveKV(ctx, "file_stolen_roots_repaired", "1")
 }
 
 // purgeAbandonedIndexEvents clears the incremental-index event backlog exactly
@@ -390,8 +511,7 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 	upsertStmt := `INSERT INTO file (
 		file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at, crawled_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(file_id) DO UPDATE SET
-		share_code=excluded.share_code,
+	ON CONFLICT(share_code, file_id) DO UPDATE SET
 		parent_id=excluded.parent_id,
 		name=excluded.name,
 		ext=excluded.ext,
