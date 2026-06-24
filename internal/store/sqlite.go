@@ -217,6 +217,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_id ON file(file_id);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {

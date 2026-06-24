@@ -46,11 +46,7 @@ var (
 var rebuildBatchSize = 2000
 
 type searchDoc struct {
-	FileID    string `json:"file_id"`
-	ShareCode string `json:"share_code"`
-	Name      string `json:"name"`
-	IsDir     bool   `json:"is_dir"`
-	Depth     int    `json:"depth"`
+	Name string `json:"name"`
 }
 
 func (d searchDoc) Type() string {
@@ -104,11 +100,7 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 	}
 	for _, f := range files {
 		doc := searchDoc{
-			FileID:    f.FileID,
-			ShareCode: f.ShareCode,
-			Name:      f.Name,
-			IsDir:     f.IsDir,
-			Depth:     f.Depth,
+			Name: f.Name,
 		}
 		if err := batch.Index(f.FileID, doc); err != nil {
 			index.Close()
@@ -182,11 +174,7 @@ func (b *Builder) applyInto(ctx context.Context, index bleve.Index, provider Eve
 				continue
 			}
 			if err := batch.Index(file.FileID, searchDoc{
-				FileID:    file.FileID,
-				ShareCode: file.ShareCode,
-				Name:      file.Name,
-				IsDir:     file.IsDir,
-				Depth:     file.Depth,
+				Name: file.Name,
 			}); err != nil {
 				return 0, err
 			}
