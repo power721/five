@@ -7,7 +7,7 @@ go build -o five ./cmd/115-indexer/
 echo "downloading..."
 scp ubuntu@YOUR_SERVER_IP:~/115.index.zip 115-index.db.zip
 
-ls -lh
+ls -lh *.zip
 rm -rf data/
 mkdir data/
 

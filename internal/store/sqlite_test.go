@@ -882,7 +882,7 @@ func TestExportTrimmedRetainsShareGroup(t *testing.T) {
 	}
 }
 
-func TestExportTrimmedDropsFileTimestamps(t *testing.T) {
+func TestExportTrimmedStripsCrawledAtKeepsUpdatedAt(t *testing.T) {
 	ctx := context.Background()
 	s, cleanup := openTestStore(t)
 	defer cleanup()
@@ -907,22 +907,28 @@ func TestExportTrimmedDropsFileTimestamps(t *testing.T) {
 	}
 	defer db.Close()
 
-	for _, col := range []string{"updated_at", "crawled_at"} {
-		var n int
-		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name=?`, col).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Fatalf("trimmed file table still has column %s", col)
-		}
+	// crawled_at is stripped (crawler bookkeeping); updated_at is kept for consumers.
+	var crawled, updated int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name='crawled_at'`).Scan(&crawled); err != nil {
+		t.Fatal(err)
 	}
-	// File rows and their data survive the column drop.
+	if crawled != 0 {
+		t.Fatalf("trimmed file table still has crawled_at")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name='updated_at'`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("trimmed file table missing updated_at (consumers use it)")
+	}
+	// File data and updated_at value survive.
 	var name string
-	if err := db.QueryRowContext(ctx, `SELECT name FROM file WHERE file_id='f1'`).Scan(&name); err != nil {
+	var updatedAt int64
+	if err := db.QueryRowContext(ctx, `SELECT name, updated_at FROM file WHERE file_id='f1'`).Scan(&name, &updatedAt); err != nil {
 		t.Fatalf("read file after export: %v", err)
 	}
-	if name != "movie.mkv" {
-		t.Fatalf("file name = %q, want movie.mkv", name)
+	if name != "movie.mkv" || updatedAt != 2 {
+		t.Fatalf("file = %q updated_at=%d, want movie.mkv / 2", name, updatedAt)
 	}
 }
 
