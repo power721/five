@@ -71,9 +71,11 @@ func TestClassifySnapResponseErrors(t *testing.T) {
 // permanent, so it must be DEAD (never retried), not RETRYABLE.
 func TestClassifySnapErrorMarksChineseDeadShareMessages(t *testing.T) {
 	cases := []string{
-		"分享已取消",   // share has been cancelled (confirmed from production logs)
-		"分享不存在",   // share not found
-		"提取码错误",   // wrong receive code
+		"分享已取消", // share has been cancelled (confirmed from production logs)
+		"分享不存在", // share not found
+		"提取码错误", // wrong receive code
+		"链接已失效", // link expired/invalid (confirmed from production logs)
+		"分享的文件涉嫌违规，链接已失效", // policy-violation takedown
 	}
 	for _, msg := range cases {
 		resp := SnapResponse{State: false, Error: msg}
