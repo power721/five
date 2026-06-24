@@ -170,6 +170,15 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 					})
 				}
 			}
+			// Mark the cid visited before saving the end-of-page checkpoint when
+			// this was its last page: the checkpoint advances NextOffset past the
+			// data, so it must already record the cid as done. Otherwise an
+			// interruption right after the save leaves a checkpoint pointing at an
+			// empty past-end page with the cid unvisited, and the next run re-fetch
+			// loops forever ("empty data with nonzero count").
+			if !page.HasMore {
+				visited[task.CID] = true
+			}
 			cp = model.Checkpoint{
 				ShareCode:   share.ShareCode,
 				CID:         task.CID,
@@ -183,7 +192,6 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				return err
 			}
 			if !page.HasMore {
-				visited[task.CID] = true
 				break
 			}
 			offset += c.cfg.PageSize

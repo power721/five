@@ -44,6 +44,7 @@ type memoryStore struct {
 	files          []model.File
 	checkpoint     model.Checkpoint
 	checkpointSeen bool
+	history        []model.Checkpoint
 	upsertBatches  [][]string
 	metaUpdates    []shareMetaUpdate
 }
@@ -68,6 +69,7 @@ func (m *memoryStore) UpsertFiles(_ context.Context, files []model.File) error {
 func (m *memoryStore) SaveCheckpoint(_ context.Context, cp model.Checkpoint) error {
 	m.checkpoint = cp
 	m.checkpointSeen = true
+	m.history = append(m.history, cp)
 	return nil
 }
 
@@ -373,6 +375,56 @@ func TestCrawlerPersistsShareMetadataOncePerCrawl(t *testing.T) {
 	got := store.metaUpdates[0]
 	if got.shareCode != "sw68wz93ncb" || got.receiveCode != "6666" || got.title != "电影-欧美高清3.89T" || got.size != 4273516964003 {
 		t.Fatalf("unexpected meta update: %#v", got)
+	}
+}
+
+func TestCrawlerMarksCIDVisitedBeforeAdvancingCheckpoint(t *testing.T) {
+	// Cid "0" holds one directory and finishes in a single page (HasMore=false).
+	// The checkpoint saved the instant "0" completes must already mark "0"
+	// visited. Otherwise an interruption right after that save leaves a
+	// checkpoint pointing past the data (NextOffset=PageSize) with "0" unvisited,
+	// so the next run re-fetches the now-empty past-end page and the share gets
+	// stuck in a permanent failure loop — the exact bug that shelves healthy
+	// shares with "empty data with nonzero count".
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {{
+				Nodes: []model.File{
+					{FileID: "d1", ShareCode: "swf01d43zby", ParentID: "0", Name: "Season 01", IsDir: true},
+				},
+				HasMore: false,
+			}},
+			"d1": {{
+				Nodes: []model.File{
+					{FileID: "f1", ShareCode: "swf01d43zby", ParentID: "d1", Name: "Episode 1.mkv", Ext: "mkv"},
+				},
+				HasMore: false,
+			}},
+		},
+	}
+	store := &memoryStore{}
+	c := New(lister, store, Config{PageSize: 100})
+	share := model.Share{ShareCode: "swf01d43zby", ReceiveCode: "echo"}
+
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share: %v", err)
+	}
+
+	// The end-of-cid checkpoint for "0" is the one saved after its only page,
+	// identified by CID="0" and NextOffset=PageSize (advanced past the data).
+	var done model.Checkpoint
+	found := false
+	for _, cp := range store.history {
+		if cp.CID == "0" && cp.NextOffset == 100 {
+			done = cp
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no end-of-cid checkpoint for \"0\" (CID=0, NextOffset=100) in history")
+	}
+	if !done.Visited["0"] {
+		t.Fatalf("end-of-cid checkpoint for \"0\" must mark \"0\" visited so an interrupted resume does not re-fetch the past-end page; visited=%#v", done.Visited)
 	}
 }
 
