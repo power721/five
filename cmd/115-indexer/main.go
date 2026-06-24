@@ -42,6 +42,7 @@ func main() {
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
 		backfillDelay     = flag.Duration("backfill-delay", 500*time.Millisecond, "delay between share/snap requests in backfill-share-meta mode")
 		outPath           = flag.String("out", "", "output path for export-db mode, e.g. dist/index.db")
+		apply             = flag.Bool("apply", false, "apply changes for dry-run modes (currently dedupe-share-titles)")
 	)
 	flag.Parse()
 
@@ -356,6 +357,10 @@ func main() {
 			log.Fatalf("build package: %v", err)
 		}
 		fmt.Fprintf(os.Stdout, "packaged index to %s (db trimmed to file+share; bleve from %s)\n", *outPath, bleveSrc)
+	case "dedupe-share-titles":
+		if err := runDedupeShareTitles(ctx, s, *apply, os.Stdout); err != nil {
+			log.Fatalf("dedupe share titles: %v", err)
+		}
 	default:
 		log.Fatalf("unsupported mode %q", *mode)
 	}
