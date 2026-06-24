@@ -20,6 +20,7 @@ type Registry interface {
 	RecordShareFailure(ctx context.Context, shareCode, errText string) error
 	MarkShareDead(ctx context.Context, shareCode, errText string) error
 	MarkShareShelved(ctx context.Context, shareCode, errText string) error
+	DedupeShareTitles(ctx context.Context, dryRun bool) ([]model.ShareRename, error)
 }
 
 type Runner interface {
@@ -90,6 +91,17 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 				}
 			}
 		}
+	}
+	// Dedupe share titles after the crawl so newly added shares (and any titles
+	// set this run) cannot collide. Cheap: an in-memory group-by that writes only
+	// when collisions exist. Runs every cycle, so admin/import-added shares are
+	// covered once crawled.
+	renames, err := s.registry.DedupeShareTitles(ctx, false)
+	if err != nil {
+		return proxyFailureOnly, err
+	}
+	for _, r := range renames {
+		s.logger.Printf("event=share_title_deduped share=%s from=%q to=%q", r.ShareCode, r.From, r.To)
 	}
 	return proxyFailureOnly, nil
 }

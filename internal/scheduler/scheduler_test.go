@@ -18,6 +18,9 @@ type registryStore struct {
 	markedFailed  []string
 	markedDead    []string
 	markedShelved []string
+	dedupeCalls   int
+	dedupeDryRun  bool
+	dedupeReturns []model.ShareRename
 }
 
 func (r *registryStore) ListSharesForCrawl(_ context.Context, _ int64) ([]model.Share, error) {
@@ -42,6 +45,12 @@ func (r *registryStore) MarkShareDead(_ context.Context, shareCode, _ string) er
 func (r *registryStore) MarkShareShelved(_ context.Context, shareCode, _ string) error {
 	r.markedShelved = append(r.markedShelved, shareCode)
 	return nil
+}
+
+func (r *registryStore) DedupeShareTitles(_ context.Context, dryRun bool) ([]model.ShareRename, error) {
+	r.dedupeCalls++
+	r.dedupeDryRun = dryRun
+	return r.dedupeReturns, nil
 }
 
 type crawlRunner struct {
@@ -181,6 +190,9 @@ func (emptyRegistry) MarkShareCrawled(context.Context, string, int64) error    {
 func (emptyRegistry) RecordShareFailure(context.Context, string, string) error { return nil }
 func (emptyRegistry) MarkShareDead(context.Context, string, string) error      { return nil }
 func (emptyRegistry) MarkShareShelved(context.Context, string, string) error   { return nil }
+func (emptyRegistry) DedupeShareTitles(context.Context, bool) ([]model.ShareRename, error) {
+	return nil, nil
+}
 
 type countingRunner struct {
 	calls *atomic.Int32
@@ -355,4 +367,31 @@ func (r *sequenceRunner) CrawlShare(context.Context, model.Share, int64) error {
 	err := r.errs[r.calls]
 	r.calls++
 	return err
+}
+
+func TestSchedulerDedupesShareTitlesAfterCrawl(t *testing.T) {
+	var buf bytes.Buffer
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "ok", ReceiveCode: "a"},
+		},
+		dedupeReturns: []model.ShareRename{
+			{ShareCode: "ok", From: "Dup", To: "Dup1"},
+		},
+	}
+	s := New(store, crawlRunner{}, &buf)
+	if _, err := s.RunOnce(context.Background(), 1); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	if store.dedupeCalls != 1 {
+		t.Fatalf("dedupe calls = %d, want 1", store.dedupeCalls)
+	}
+	if store.dedupeDryRun != false {
+		t.Fatalf("dedupe dryRun = %v, want false (scheduler applies)", store.dedupeDryRun)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("event=share_title_deduped share=ok")) ||
+		!bytes.Contains(buf.Bytes(), []byte(`from="Dup"`)) ||
+		!bytes.Contains(buf.Bytes(), []byte(`to="Dup1"`)) {
+		t.Fatalf("missing dedupe log: %q", buf.String())
+	}
 }
