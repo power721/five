@@ -268,6 +268,15 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 		return SnapResponse{}, err
 	}
 	if err := ClassifySnapError(out); err != nil {
+		// 115 reports the folder's total count on every page. An empty list with
+		// a positive count is the normal end-of-pagination signal when the caller
+		// has already paged past the last item (offset >= count): the snap for a
+		// 1-item folder at offset 100 returns count=1, list=[]. That is not the
+		// stale-cookie "empty data" failure, which only happens at offset 0, so
+		// return the empty page and let the caller treat the directory as done.
+		if IsEmptyDataError(err) && req.Offset >= out.Data.Count {
+			return out, nil
+		}
 		if IsEmptyDataError(err) {
 			c.clearCookies()
 		}

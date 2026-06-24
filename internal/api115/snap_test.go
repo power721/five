@@ -192,6 +192,44 @@ func snapServer(t *testing.T) *httptest.Server {
 	}))
 }
 
+// TestListTreatsPastEndPaginationAsEmpty reproduces the stuck-share failure: 115
+// reports the folder's total count on every page, so a request whose page lies
+// past the last item returns a positive count with an empty list. That is the
+// normal end-of-pagination signal (the crawler resumed at an offset >= count),
+// not the stale-cookie "empty data" failure that only applies at offset 0. List
+// must return the empty page instead of a retryable error, or shares get stuck
+// in a permanent failure loop and are eventually shelved despite being healthy.
+func TestListTreatsPastEndPaginationAsEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 1, "list": [], "share_state": 1}
+		}`))
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL, HTTPClient: &http.Client{}}
+	resp, err := client.List(context.Background(), ListRequest{
+		ShareCode:   "swhbs4r3zh9",
+		ReceiveCode: "ec38",
+		CID:         "3024857740807973702",
+		Offset:      100,
+		Limit:       100,
+	})
+	if err != nil {
+		t.Fatalf("past-end pagination (offset>=count) should be an empty page, not an error: %v", err)
+	}
+	if len(resp.Data.List) != 0 {
+		t.Fatalf("list = %d items, want 0", len(resp.Data.List))
+	}
+	if resp.Data.Count != 1 {
+		t.Fatalf("count = %d, want 1 (folder total preserved)", resp.Data.Count)
+	}
+}
+
 func TestListClearsCookiesWhenProxySwitches(t *testing.T) {
 	server := snapServer(t)
 	defer server.Close()
