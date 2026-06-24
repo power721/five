@@ -112,3 +112,61 @@ func TestRenameShareTitle(t *testing.T) {
 		t.Fatalf("rename missing share: %v", err)
 	}
 }
+
+func TestDedupeShareTitles(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	for _, c := range []string{"id1", "id2", "id3"} {
+		if err := s.UpdateShareMeta(ctx, c, "rc", "原盘精选", 0); err != nil {
+			t.Fatalf("seed %s: %v", c, err)
+		}
+	}
+
+	t.Run("dry run plans without writing", func(t *testing.T) {
+		renames, err := s.DedupeShareTitles(ctx, true)
+		if err != nil {
+			t.Fatalf("dedupe dry-run: %v", err)
+		}
+		if len(renames) != 2 {
+			t.Fatalf("dry-run renames = %v, want 2", renames)
+		}
+		got, _, _ := s.GetShare(ctx, "id2")
+		if got.ShareTitle != "原盘精选" {
+			t.Fatalf("dry-run mutated db: id2 title = %q", got.ShareTitle)
+		}
+	})
+
+	t.Run("apply writes the planned renames", func(t *testing.T) {
+		renames, err := s.DedupeShareTitles(ctx, false)
+		if err != nil {
+			t.Fatalf("dedupe apply: %v", err)
+		}
+		if len(renames) != 2 {
+			t.Fatalf("apply renames = %v, want 2", renames)
+		}
+		titles := map[string]string{}
+		for _, c := range []string{"id1", "id2", "id3"} {
+			sh, _, _ := s.GetShare(ctx, c)
+			titles[c] = sh.ShareTitle
+		}
+		want := map[string]string{"id1": "原盘精选", "id2": "原盘精选1", "id3": "原盘精选2"}
+		if titles["id1"] != want["id1"] || titles["id2"] != want["id2"] || titles["id3"] != want["id3"] {
+			t.Fatalf("titles after apply = %v, want %v", titles, want)
+		}
+	})
+
+	t.Run("second apply is a no-op (idempotent)", func(t *testing.T) {
+		renames, err := s.DedupeShareTitles(ctx, false)
+		if err != nil {
+			t.Fatalf("second dedupe: %v", err)
+		}
+		if len(renames) != 0 {
+			t.Fatalf("second apply renames = %v, want none", renames)
+		}
+	})
+}

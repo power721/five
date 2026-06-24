@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -71,4 +72,24 @@ func planShareRenames(shares []model.Share) []model.ShareRename {
 func (s *Store) RenameShareTitle(ctx context.Context, shareCode, newTitle string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE share SET share_title=? WHERE share_code=?`, newTitle, shareCode)
 	return err
+}
+
+// DedupeShareTitles plans title renames over all shares and, unless dryRun,
+// applies them. Returns the planned/applied renames. Idempotent: re-running
+// re-plans on the current state, so a partial apply completes on the next run.
+func (s *Store) DedupeShareTitles(ctx context.Context, dryRun bool) ([]model.ShareRename, error) {
+	shares, err := s.ListShares(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list shares: %w", err)
+	}
+	renames := planShareRenames(shares)
+	if dryRun {
+		return renames, nil
+	}
+	for _, r := range renames {
+		if err := s.RenameShareTitle(ctx, r.ShareCode, r.To); err != nil {
+			return nil, fmt.Errorf("rename share %s: %w", r.ShareCode, err)
+		}
+	}
+	return renames, nil
 }
