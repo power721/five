@@ -882,6 +882,50 @@ func TestExportTrimmedRetainsShareGroup(t *testing.T) {
 	}
 }
 
+func TestExportTrimmedDropsFileTimestamps(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "r", Status: "ACTIVE"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{{
+		FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "movie.mkv",
+		Ext: "mkv", Size: 100, SHA1: "abc", CrawledAt: 1, UpdatedAt: 2,
+	}}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, dest); err != nil {
+		t.Fatalf("ExportTrimmed() error = %v", err)
+	}
+	db, err := sql.Open("sqlite", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, col := range []string{"updated_at", "crawled_at"} {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name=?`, col).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("trimmed file table still has column %s", col)
+		}
+	}
+	// File rows and their data survive the column drop.
+	var name string
+	if err := db.QueryRowContext(ctx, `SELECT name FROM file WHERE file_id='f1'`).Scan(&name); err != nil {
+		t.Fatalf("read file after export: %v", err)
+	}
+	if name != "movie.mkv" {
+		t.Fatalf("file name = %q, want movie.mkv", name)
+	}
+}
+
 func openTestStore(t *testing.T) (*Store, func()) {
 	t.Helper()
 	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "index.db"))

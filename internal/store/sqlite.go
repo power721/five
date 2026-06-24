@@ -124,6 +124,37 @@ func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
 			return fmt.Errorf("prune dead shares %q: %w", stmt, err)
 		}
 	}
+	// The file table ships to consumers; strip crawler bookkeeping columns
+	// (updated_at, crawled_at) they don't use so the export carries only file
+	// data. SQLite can't DROP COLUMN without leaving a duplicate index on this
+	// build, so rebuild the table and recreate its indexes, like
+	// migrateFileCompositePK does.
+	for _, stmt := range []string{
+		`CREATE TABLE file_new (
+			file_id TEXT NOT NULL,
+			share_code TEXT NOT NULL,
+			parent_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			ext TEXT NOT NULL DEFAULT '',
+			size INTEGER NOT NULL DEFAULT 0,
+			is_dir INTEGER NOT NULL DEFAULT 0,
+			depth INTEGER NOT NULL DEFAULT 0,
+			sha1 TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (share_code, file_id)
+		);`,
+		`INSERT INTO file_new (file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1)
+			SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1 FROM file;`,
+		`DROP TABLE file;`,
+		`ALTER TABLE file_new RENAME TO file;`,
+		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("strip file columns %q: %w", stmt, err)
+		}
+	}
 	if _, err := db.ExecContext(ctx, "VACUUM;"); err != nil {
 		return fmt.Errorf("vacuum: %w", err)
 	}
