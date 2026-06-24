@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"five/internal/model"
@@ -76,5 +78,37 @@ func assertRenames(t *testing.T, got, want []model.ShareRename) {
 		if got[i] != want[i] {
 			t.Fatalf("renames[%d] = %#v, want %#v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestRenameShareTitle(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpdateShareMeta(ctx, "sw1", "rc", "Original", 1234); err != nil {
+		t.Fatalf("seed share: %v", err)
+	}
+
+	if err := s.RenameShareTitle(ctx, "sw1", "Renamed"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got, ok, err := s.GetShare(ctx, "sw1")
+	if err != nil || !ok {
+		t.Fatalf("get share: ok=%v err=%v", ok, err)
+	}
+	if got.ShareTitle != "Renamed" {
+		t.Fatalf("share_title = %q, want Renamed", got.ShareTitle)
+	}
+	if got.FileSize != 1234 || got.Status != "ACTIVE" || got.Version != 0 {
+		t.Fatalf("rename touched other columns: %#v", got)
+	}
+
+	// Renaming a share that does not exist is a no-op, not an error.
+	if err := s.RenameShareTitle(ctx, "nope", "Whatever"); err != nil {
+		t.Fatalf("rename missing share: %v", err)
 	}
 }

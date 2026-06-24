@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
@@ -63,4 +64,11 @@ func planShareRenames(shares []model.Share) []model.ShareRename {
 		}
 	}
 	return renames
+}
+
+// RenameShareTitle sets share_title for every row with share_code, leaving
+// file_size, status, and version untouched. Used by DedupeShareTitles.
+func (s *Store) RenameShareTitle(ctx context.Context, shareCode, newTitle string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE share SET share_title=? WHERE share_code=?`, newTitle, shareCode)
+	return err
 }
