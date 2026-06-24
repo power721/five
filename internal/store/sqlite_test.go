@@ -612,6 +612,46 @@ func TestSQLiteStoreCountFilesByShare(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreShareFileStats(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", Size: 1000, IsDir: false, CrawledAt: 1},
+		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Ext: "mkv", Size: 2500, IsDir: false, CrawledAt: 1},
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "sub", Ext: "", Size: 0, IsDir: true, CrawledAt: 1},
+		{FileID: "f3", ShareCode: "sw2", ParentID: "0", Name: "c.mkv", Ext: "mkv", Size: 9999, IsDir: false, CrawledAt: 1},
+	}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+
+	count, total, err := s.ShareFileStats(ctx, "sw1")
+	if err != nil {
+		t.Fatalf("share file stats sw1: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("sw1 file count = %d, want 2 (dirs excluded)", count)
+	}
+	if total != 3500 {
+		t.Fatalf("sw1 total size = %d, want 3500", total)
+	}
+
+	// Missing/empty share yields zero totals rather than an error.
+	count, total, err = s.ShareFileStats(ctx, "missing")
+	if err != nil {
+		t.Fatalf("share file stats missing: %v", err)
+	}
+	if count != 0 || total != 0 {
+		t.Fatalf("missing stats = (%d, %d), want (0, 0)", count, total)
+	}
+}
+
 func TestSQLiteStoreExportSnapshotIsSelfContained(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")

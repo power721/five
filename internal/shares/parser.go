@@ -105,3 +105,13 @@ func ParseURL(raw string) (model.Share, error) {
 		Status:      "ACTIVE",
 	}, nil
 }
+
+// ShareURL builds the canonical 115 share link for a code and its receive
+// (password) code. It is the inverse of ParseURL: the password query string is
+// omitted when receiveCode is empty.
+func ShareURL(shareCode, receiveCode string) string {
+	if receiveCode == "" {
+		return "https://115.com/s/" + shareCode
+	}
+	return "https://115.com/s/" + shareCode + "?password=" + receiveCode
+}

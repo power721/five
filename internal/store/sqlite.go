@@ -751,6 +751,20 @@ func (s *Store) CountFilesByShare(ctx context.Context, shareCode string) (int, e
 	return count, nil
 }
 
+// ShareFileStats returns the number of indexed files (folders excluded) for a
+// share and the sum of their sizes. A share with no indexed files yields (0, 0).
+func (s *Store) ShareFileStats(ctx context.Context, shareCode string) (int, int64, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(size), 0) FROM file WHERE share_code = ? AND is_dir = 0`,
+		shareCode)
+	var count int
+	var total int64
+	if err := row.Scan(&count, &total); err != nil {
+		return 0, 0, err
+	}
+	return count, total, nil
+}
+
 func (s *Store) ListShares(ctx context.Context) ([]model.Share, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
 		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version

@@ -84,6 +84,22 @@ func TestParseTokenFormatWithPasswordAndName(t *testing.T) {
 	}
 }
 
+func TestShareURLWithPassword(t *testing.T) {
+	got := ShareURL("swf01d43zby", "echo")
+	want := "https://115.com/s/swf01d43zby?password=echo"
+	if got != want {
+		t.Fatalf("ShareURL = %q, want %q", got, want)
+	}
+}
+
+func TestShareURLWithoutPassword(t *testing.T) {
+	got := ShareURL("swf01d43zby", "")
+	want := "https://115.com/s/swf01d43zby"
+	if got != want {
+		t.Fatalf("ShareURL = %q, want %q", got, want)
+	}
+}
+
 func TestParseAcceptsShareURLsInFile(t *testing.T) {
 	input := strings.NewReader(`# either 4-column format or share URL
 https://115.com/s/swf01d43zby?password=echo

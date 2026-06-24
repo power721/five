@@ -28,6 +28,12 @@ type fakeStore struct {
 	allFilesErr    error
 	eventsErr      error
 	reactivated    []string
+	fileStats      map[string]fakeFileStats
+}
+
+type fakeFileStats struct {
+	count int
+	total int64
 }
 
 func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
@@ -59,6 +65,13 @@ func (f *fakeStore) AllFiles(context.Context) ([]model.File, error) {
 
 func (f *fakeStore) CountFiles(context.Context) (int, error) {
 	return f.fileCount, nil
+}
+
+func (f *fakeStore) ShareFileStats(_ context.Context, shareCode string) (int, int64, error) {
+	if st, ok := f.fileStats[shareCode]; ok {
+		return st.count, st.total, nil
+	}
+	return 0, 0, nil
 }
 
 func (f *fakeStore) PendingIndexEvents(context.Context, int) ([]model.IndexEvent, error) {
@@ -320,5 +333,42 @@ func TestShareDetailReturnsCheckpointProgress(t *testing.T) {
 	}
 	if body.LastError != "timeout" {
 		t.Fatalf("last_error = %q", body.LastError)
+	}
+}
+
+func TestShareDetailReturnsLinkFileCountAndTotalSize(t *testing.T) {
+	store := &fakeStore{
+		shares: []model.Share{
+			{ShareCode: "sw1", ReceiveCode: "echo", Status: "ACTIVE"},
+		},
+		fileStats: map[string]fakeFileStats{
+			"sw1": {count: 2, total: 3500},
+		},
+	}
+	srv := New(store, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/shares/sw1", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rr.Code)
+	}
+	var body ShareDetailResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode share detail: %v", err)
+	}
+	if body.Link != "https://115.com/s/sw1?password=echo" {
+		t.Fatalf("link = %q, want https://115.com/s/sw1?password=echo", body.Link)
+	}
+	if body.FileCount != 2 {
+		t.Fatalf("fileCount = %d, want 2", body.FileCount)
+	}
+	if body.TotalFileSize != 3500 {
+		t.Fatalf("totalFileSize = %d, want 3500", body.TotalFileSize)
+	}
+	// Existing detail fields are preserved.
+	if body.ShareCode != "sw1" || body.Status != "ACTIVE" {
+		t.Fatalf("existing fields lost: %#v", body)
 	}
 }

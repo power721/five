@@ -19,6 +19,7 @@ type Store interface {
 	CountShares(ctx context.Context) (int, error)
 	UpsertShare(ctx context.Context, share model.Share) error
 	CountFiles(ctx context.Context) (int, error)
+	ShareFileStats(ctx context.Context, shareCode string) (int, int64, error)
 	CountPendingIndexEvents(ctx context.Context) (int, error)
 	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
@@ -41,6 +42,15 @@ type ShareProgress struct {
 	VisitedCount int    `json:"visited_count,omitempty"`
 	NextOffset   int    `json:"next_offset,omitempty"`
 	ActiveCID    string `json:"active_cid,omitempty"`
+}
+
+// ShareDetailResponse is the GET /shares/{code} payload: the crawl progress in
+// ShareProgress plus the canonical share link and per-share indexed file totals.
+type ShareDetailResponse struct {
+	ShareProgress
+	Link          string `json:"link"`
+	FileCount     int    `json:"fileCount"`
+	TotalFileSize int64  `json:"totalFileSize"`
 }
 
 type Server struct {
@@ -240,7 +250,17 @@ func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
 		progress.NextOffset = cp.NextOffset
 		progress.ActiveCID = cp.CID
 	}
-	writeJSON(w, http.StatusOK, progress)
+	fileCount, totalSize, err := s.store.ShareFileStats(r.Context(), shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, ShareDetailResponse{
+		ShareProgress: progress,
+		Link:          shares.ShareURL(share.ShareCode, share.ReceiveCode),
+		FileCount:     fileCount,
+		TotalFileSize: totalSize,
+	})
 }
 
 func (s *Server) handleShareReactivate(w http.ResponseWriter, r *http.Request, shareCode string) {
