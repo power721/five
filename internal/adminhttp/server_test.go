@@ -28,6 +28,7 @@ type fakeStore struct {
 	allFilesErr    error
 	eventsErr      error
 	reactivated    []string
+	deleted        []string
 	fileStats      map[string]fakeFileStats
 }
 
@@ -113,6 +114,17 @@ func (f *fakeStore) ReactivateShare(_ context.Context, shareCode string) (bool, 
 	return false, nil
 }
 
+func (f *fakeStore) DeleteShare(_ context.Context, shareCode string) (bool, error) {
+	for i, share := range f.shares {
+		if share.ShareCode == shareCode {
+			f.shares = append(f.shares[:i], f.shares[i+1:]...)
+			f.deleted = append(f.deleted, shareCode)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func TestServerReactivateShare(t *testing.T) {
 	store := &fakeStore{
 		shares: []model.Share{
@@ -154,6 +166,73 @@ func TestServerReactivateShare(t *testing.T) {
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1/reactivate", nil))
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET reactivate status = %d, want 405", rr.Code)
+	}
+}
+
+func TestServerDeleteShare(t *testing.T) {
+	// Share with no files -> deleted outright, 200.
+	store := &fakeStore{
+		shares: []model.Share{{ShareCode: "empty", Status: "ACTIVE"}},
+	}
+	srv := New(store, &bytes.Buffer{})
+
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/empty", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("empty share status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "empty" {
+		t.Fatalf("deleted = %#v, want [empty]", store.deleted)
+	}
+
+	// Share with files, no force -> 409, nothing deleted.
+	store = &fakeStore{
+		shares:   []model.Share{{ShareCode: "full", Status: "ACTIVE"}},
+		fileStats: map[string]fakeFileStats{"full": {count: 5, total: 100}},
+	}
+	srv = New(store, &bytes.Buffer{})
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/full", nil))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("full share no-force status = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("must not delete without force; deleted = %#v", store.deleted)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	if body["file_count"] != float64(5) {
+		t.Fatalf("409 file_count = %v, want 5", body["file_count"])
+	}
+
+	// Same share with force=true -> 200, deleted.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/full?force=true", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("full share force status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "full" {
+		t.Fatalf("force deleted = %#v, want [full]", store.deleted)
+	}
+
+	// Unknown share -> 404.
+	store = &fakeStore{}
+	srv = New(store, &bytes.Buffer{})
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/nope", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown share status = %d, want 404", rr.Code)
+	}
+
+	// Detail GET still works (routing must not swallow it).
+	store = &fakeStore{shares: []model.Share{{ShareCode: "sw1", Status: "ACTIVE"}}}
+	srv = New(store, &bytes.Buffer{})
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail GET status = %d, want 200", rr.Code)
 	}
 }
 

@@ -24,6 +24,7 @@ type Store interface {
 	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 	ReactivateShare(ctx context.Context, shareCode string) (bool, error)
+	DeleteShare(ctx context.Context, shareCode string) (bool, error)
 }
 
 type StatusResponse struct {
@@ -218,6 +219,10 @@ func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
 		s.handleShareReactivate(w, r, code)
 		return
 	}
+	if r.Method == http.MethodDelete {
+		s.handleShareDelete(w, r, rest)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -283,6 +288,47 @@ func (s *Server) handleShareReactivate(w http.ResponseWriter, r *http.Request, s
 	}
 	s.logger.Printf("event=share_reactivated share=%s", shareCode)
 	writeJSON(w, http.StatusOK, map[string]string{"share_code": shareCode, "status": "ACTIVE"})
+}
+
+// handleShareDelete implements DELETE /shares/{code}[?force=true]. A share with
+// no indexed files is deleted outright; a share that still has files is refused
+// (409) unless force=true is passed, in which case the share and all of its
+// files/checkpoint are removed.
+func (s *Server) handleShareDelete(w http.ResponseWriter, r *http.Request, shareCode string) {
+	if shareCode == "" {
+		http.Error(w, "share code required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	fileCount, _, err := s.store.ShareFileStats(ctx, shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	force := r.URL.Query().Get("force") == "true"
+	if fileCount > 0 && !force {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":     fmt.Sprintf("share has %d files; pass force=true to delete", fileCount),
+			"share_code": shareCode,
+			"file_count": fileCount,
+		})
+		return
+	}
+	ok, err := s.store.DeleteShare(ctx, shareCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.logger.Printf("event=share_deleted share=%s files=%d force=%v", shareCode, fileCount, force)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"share_code": shareCode,
+		"deleted":    true,
+		"file_count": fileCount,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
