@@ -93,6 +93,34 @@ func TestClassifiedErrorSupportsErrorsIs(t *testing.T) {
 	}
 }
 
+// A proxy that rejects the CONNECT tunnel with HTTP 410 surfaces as a
+// *url.Error whose cause is "Gone" — the exact production failure. When a proxy
+// is in use, such a transport error must be a proxy failure so the pool records
+// it and rotates to a fresh IP, instead of retrying the same dead proxy and
+// abandoning the share.
+func TestClassifyTransportErrorThroughProxyIsProxyFailure(t *testing.T) {
+	gone := &url.Error{Op: "Get", URL: "https://115cdn.com/webapi/share/snap", Err: errors.New("Gone")}
+
+	if got := classifyTransportError(gone, false); !IsRetryable(got) {
+		t.Fatalf("direct transport error should stay retryable, got %v", got)
+	}
+	if got := classifyTransportError(gone, true); !IsProxyFailure(got) {
+		t.Fatalf("transport error through a proxy must be proxy failure so the pool rotates, got %v", got)
+	}
+
+	// A timeout stays a proxy failure regardless of proxy (existing behavior).
+	timedOut := &url.Error{Op: "Get", URL: "https://115cdn.com/", Err: &timeoutNetErr{}}
+	if got := classifyTransportError(timedOut, false); !IsProxyFailure(got) {
+		t.Fatalf("timeout should be proxy failure without proxy too, got %v", got)
+	}
+}
+
+type timeoutNetErr struct{}
+
+func (timeoutNetErr) Error() string   { return "i/o timeout" }
+func (timeoutNetErr) Timeout() bool   { return true }
+func (timeoutNetErr) Temporary() bool { return false }
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -428,6 +456,64 @@ func TestClientDoesNotFallBackToDirectWhenProxyPoolIsExhausted(t *testing.T) {
 	}
 	if !IsProxyFailure(err) {
 		t.Fatalf("expected proxy failure when proxy pool exhausted, got %v", err)
+	}
+}
+
+// A proxy that drops the connection mid-request produces a transport-level
+// error (same class as a proxy returning "Gone" to the CONNECT tunnel). It must
+// rotate to the next proxy and succeed, not bubble up and abandon the share.
+func TestClientRotatesProxyOnTransportFailure(t *testing.T) {
+	brokenProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("test server does not support hijack")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer brokenProxy.Close()
+
+	okProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 0, "list": [], "share_state": 1}
+		}`)
+	}))
+	defer okProxy.Close()
+
+	recorder := &proxyRecorder{
+		queue: []ProxyRef{
+			{ID: "p1", URL: brokenProxy.URL},
+			{ID: "p2", URL: okProxy.URL},
+		},
+	}
+	client := &Client{
+		BaseURL:    "http://example.invalid",
+		HTTPClient: &http.Client{},
+		ProxyPool:  recorder,
+	}
+
+	_, err := client.List(t.Context(), ListRequest{
+		ShareCode:   "swz04pr3zh9",
+		ReceiveCode: "z381",
+		CID:         "0",
+		Offset:      0,
+		Limit:       100,
+	})
+	if err != nil {
+		t.Fatalf("expected rotation to healthy proxy, got: %v", err)
+	}
+	if len(recorder.failed) != 1 || recorder.failed[0] != "p1" {
+		t.Fatalf("expected only p1 recorded as failed, got %#v", recorder.failed)
+	}
+	if len(recorder.success) != 1 || recorder.success[0] != "p2" {
+		t.Fatalf("expected p2 recorded as success, got %#v", recorder.success)
 	}
 }
 

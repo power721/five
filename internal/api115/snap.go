@@ -252,7 +252,7 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return SnapResponse{}, ClassifyRequestError(err)
+		return SnapResponse{}, classifyTransportError(err, proxyURL != "")
 	}
 	defer resp.Body.Close()
 	if c.CookieStore != nil {

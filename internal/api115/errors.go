@@ -112,6 +112,22 @@ func ClassifyRequestError(cause error) error {
 	return WrapError(KindRetryable, "115 request failed", 0, cause)
 }
 
+// classifyTransportError classifies an error returned by httpClient.Do for a
+// snap request. While a proxy is in use, the only network path to 115 runs
+// through it, so any transport-level failure (refused connection, the proxy
+// rejecting the CONNECT tunnel with 4xx/5xx — e.g. "Gone" — a reset, EOF, or
+// TLS error) implicates the proxy rather than 115. Tagging it as a proxy
+// failure makes the pool record the miss and rotate to a fresh IP after a few
+// consecutive failures, instead of retrying the same dead proxy and eventually
+// abandoning the share.
+func classifyTransportError(cause error, usingProxy bool) error {
+	classified := ClassifyRequestError(cause)
+	if usingProxy && IsRetryable(classified) {
+		return WrapError(KindProxyFailure, "proxy request failed", 0, cause)
+	}
+	return classified
+}
+
 // isDeadShareMessage reports whether a 115 snap error text describes a share
 // that is permanently unusable (cancelled, deleted, expired, policy-violating,
 // or needs a receive code we do not have). Such shares must never be retried.
