@@ -35,6 +35,14 @@ type ShareGroup struct {
 	ShareCodes []string
 }
 
+// ShareRename is one planned/applied title rename produced by store
+// DedupeShareTitles (internal/store dedupe.go).
+type ShareRename struct {
+	ShareCode string
+	From      string
+	To        string
+}
+
 type CrawlTask struct {
 	CID   string `json:"cid"`
 	Depth int    `json:"depth"`
