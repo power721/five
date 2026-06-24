@@ -530,3 +530,32 @@ func TestCrawlerRetriesProxyFailureInPlace(t *testing.T) {
 		t.Fatalf("list page calls = %#v, want 2 calls on same page", lister.calls)
 	}
 }
+
+func TestCrawlerDoesNotOverwriteExistingShareTitle(t *testing.T) {
+	// A share whose title is already set (e.g. manually renamed, or backfilled)
+	// must keep it: the scheduler re-crawls ACTIVE shares, and overwriting would
+	// undo a dedupe. Only an empty title is filled from 115.
+	c := New(&fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					ShareTitle: "From115",
+					FileSize:   999,
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "x.mkv", Ext: "mkv", Depth: 1},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}, &memoryStore{}, Config{PageSize: 100})
+
+	store := c.store.(*memoryStore)
+	share := model.Share{ShareCode: "sw1", ReceiveCode: "rc", ShareTitle: "ManuallyRenamed"}
+	if err := c.CrawlShare(context.Background(), share, 100); err != nil {
+		t.Fatalf("crawl share: %v", err)
+	}
+	if len(store.metaUpdates) != 0 {
+		t.Fatalf("expected no meta update when title already set, got %#v", store.metaUpdates)
+	}
+}

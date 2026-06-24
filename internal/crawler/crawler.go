@@ -131,8 +131,11 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 				log.Printf("event=crawl_page_retry share=%s cid=%s offset=%d attempt=%d error=%q", share.ShareCode, task.CID, offset, attempt+1, err.Error())
 			}
 			// Share metadata (title/size) is constant per share and present on
-			// every snap page; persist it once on the first page we see.
-			if !metaPersisted && page.ShareTitle != "" {
+			// every snap page; persist it once on the first page we see. Only fill
+			// the title when it is not already set: the scheduler re-crawls ACTIVE
+			// shares, and overwriting here would undo a manual rename
+			// (e.g. dedupe-share-titles). Backfill remains the force path.
+			if !metaPersisted && page.ShareTitle != "" && share.ShareTitle == "" {
 				if err := c.store.UpdateShareMeta(ctx, share.ShareCode, share.ReceiveCode, page.ShareTitle, page.FileSize); err != nil {
 					return err
 				}
