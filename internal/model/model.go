@@ -58,12 +58,6 @@ type Checkpoint struct {
 	UpdatedAt   int64
 }
 
-type IndexEvent struct {
-	ID     int64
-	FileID string
-	Op     string
-}
-
 type IndexManifest struct {
 	Version   int64
 	IndexPath string

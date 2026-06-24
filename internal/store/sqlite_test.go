@@ -14,16 +14,6 @@ import (
 	"five/internal/model"
 )
 
-// enableIndexEventsForTest turns the (production-off) indexEventsEnabled gate
-// back on for tests that exercise UpsertFiles' event-queueing path, restoring it
-// when the test ends.
-func enableIndexEventsForTest(t *testing.T) {
-	t.Helper()
-	prev := indexEventsEnabled
-	indexEventsEnabled = true
-	t.Cleanup(func() { indexEventsEnabled = prev })
-}
-
 func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -33,7 +23,6 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
-	enableIndexEventsForTest(t)
 
 	now := time.Now().Unix()
 	files := []model.File{
@@ -75,17 +64,6 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	}
 	if len(allFiles) != 2 {
 		t.Fatalf("file count = %d, want 2", len(allFiles))
-	}
-
-	pending, err := s.PendingIndexEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("pending events: %v", err)
-	}
-	if len(pending) != 2 {
-		t.Fatalf("pending events = %d, want 2", len(pending))
-	}
-	if err := s.MarkIndexEventsProcessed(ctx, []int64{pending[0].ID, pending[1].ID}); err != nil {
-		t.Fatalf("mark processed: %v", err)
 	}
 
 	cp := model.Checkpoint{
@@ -138,155 +116,6 @@ func TestSQLiteStoreMigrateUpsertCheckpointAndManifest(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreDoesNotQueueIndexEventsForUnchangedFiles(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "index.db")
-
-	s, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer s.Close()
-	enableIndexEventsForTest(t)
-
-	now := time.Now().Unix()
-	files := []model.File{
-		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", Size: 1, CrawledAt: now},
-		{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "b.mkv", Ext: "mkv", Size: 2, CrawledAt: now},
-	}
-	if err := s.UpsertFiles(ctx, files); err != nil {
-		t.Fatalf("initial upsert files: %v", err)
-	}
-	if err := s.UpsertFiles(ctx, files); err != nil {
-		t.Fatalf("unchanged upsert files: %v", err)
-	}
-
-	pending, err := s.PendingIndexEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("pending events: %v", err)
-	}
-	if len(pending) != len(files) {
-		t.Fatalf("pending events = %d, want %d", len(pending), len(files))
-	}
-}
-
-func TestSQLiteStoreDoesNotQueueDuplicatePendingUpsertEvents(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "index.db")
-
-	s, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer s.Close()
-	enableIndexEventsForTest(t)
-
-	now := time.Now().Unix()
-	file := model.File{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: now}
-	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
-		t.Fatalf("initial upsert file: %v", err)
-	}
-	file.Name = "renamed.mkv"
-	if err := s.UpsertFiles(ctx, []model.File{file}); err != nil {
-		t.Fatalf("changed upsert file: %v", err)
-	}
-
-	pending, err := s.PendingIndexEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("pending events: %v", err)
-	}
-	if len(pending) != 1 {
-		t.Fatalf("pending events = %d, want 1", len(pending))
-	}
-}
-
-func TestSQLiteStoreCoalescesExistingPendingUpsertEventsOnOpen(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "index.db")
-
-	s, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES
-		('f1', 'upsert', 1),
-		('f1', 'upsert', 2),
-		('f2', 'upsert', 3),
-		('f2', 'upsert', 4),
-		('f3', 'upsert', 5)`)
-	if err != nil {
-		t.Fatalf("insert duplicate pending events: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	reopened, err := Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	defer reopened.Close()
-
-	pending, err := reopened.PendingIndexEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("pending events: %v", err)
-	}
-	if len(pending) != 3 {
-		t.Fatalf("pending events = %d, want 3", len(pending))
-	}
-}
-
-func TestSQLiteStorePurgesAbandonedIndexEvents(t *testing.T) {
-	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer s.Close()
-
-	// Open already ran purge once on the empty table and armed the gate. Reset the
-	// gate so the purge path can be exercised directly, then seed a backlog.
-	if err := s.DeleteKV(ctx, "index_events_purged"); err != nil {
-		t.Fatalf("reset gate: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES ('f1','upsert',1),('f2','upsert',2)`); err != nil {
-		t.Fatalf("seed backlog: %v", err)
-	}
-
-	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
-		t.Fatalf("purge: %v", err)
-	}
-
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("index_event count after purge = %d, want 0", n)
-	}
-	got, ok, err := s.LoadKV(ctx, "index_events_purged")
-	if err != nil {
-		t.Fatalf("load gate: %v", err)
-	}
-	if !ok || got != "1" {
-		t.Fatalf("purge gate = %q ok=%v, want \"1\"", got, ok)
-	}
-
-	// Once gated, purge must not re-run: newly seeded rows survive a second call.
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id, op, created_at) VALUES ('f3','upsert',3)`); err != nil {
-		t.Fatalf("reseed: %v", err)
-	}
-	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
-		t.Fatalf("second purge: %v", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event`).Scan(&n); err != nil {
-		t.Fatalf("count after gated purge: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("index_event count after gated purge = %d, want 1 (gate must block re-purge)", n)
-	}
-}
-
 func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -296,7 +125,6 @@ func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
-	enableIndexEventsForTest(t)
 
 	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "pw1", Status: "ACTIVE"}); err != nil {
 		t.Fatalf("upsert first share: %v", err)
@@ -313,14 +141,6 @@ func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 	if err := s.UpsertFiles(ctx, files); err != nil {
 		t.Fatalf("upsert files: %v", err)
 	}
-	pending, err := s.PendingIndexEvents(ctx, 10)
-	if err != nil {
-		t.Fatalf("pending events: %v", err)
-	}
-	if err := s.MarkIndexEventsProcessed(ctx, []int64{pending[0].ID}); err != nil {
-		t.Fatalf("mark first event processed: %v", err)
-	}
-
 	shareCount, err := s.CountShares(ctx)
 	if err != nil {
 		t.Fatalf("count shares: %v", err)
@@ -334,13 +154,6 @@ func TestSQLiteStoreCountsStatusAggregates(t *testing.T) {
 	}
 	if fileCount != 3 {
 		t.Fatalf("file count = %d, want 3", fileCount)
-	}
-	pendingCount, err := s.CountPendingIndexEvents(ctx)
-	if err != nil {
-		t.Fatalf("count pending index events: %v", err)
-	}
-	if pendingCount != 2 {
-		t.Fatalf("pending index events = %d, want 2", pendingCount)
 	}
 }
 
@@ -848,9 +661,6 @@ func TestExportTrimmedKeepsFileShareAndShareGroup(t *testing.T) {
 	// Populate the tables that must be dropped.
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO crawl_checkpoint(share_code,cid,next_offset,active_depth,queue_json,visited_json,updated_at) VALUES('sw1','0',0,0,'[]','{}',1)`); err != nil {
 		t.Fatalf("insert checkpoint: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO index_event(file_id,op,created_at) VALUES('f1','upsert',1)`); err != nil {
-		t.Fatalf("insert event: %v", err)
 	}
 	if err := s.UpdateManifest(ctx, model.IndexManifest{Version: 1, IndexPath: "x", Status: "READY", BuiltAt: 1, FileCount: 1}); err != nil {
 		t.Fatalf("update manifest: %v", err)

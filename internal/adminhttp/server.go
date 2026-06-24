@@ -20,7 +20,6 @@ type Store interface {
 	UpsertShare(ctx context.Context, share model.Share) error
 	CountFiles(ctx context.Context) (int, error)
 	ShareFileStats(ctx context.Context, shareCode string) (int, int64, error)
-	CountPendingIndexEvents(ctx context.Context) (int, error)
 	GetShare(ctx context.Context, shareCode string) (model.Share, bool, error)
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 	ReactivateShare(ctx context.Context, shareCode string) (bool, error)
@@ -28,9 +27,8 @@ type Store interface {
 }
 
 type StatusResponse struct {
-	ShareCount         int `json:"share_count"`
-	FileCount          int `json:"file_count"`
-	PendingIndexEvents int `json:"pending_index_events"`
+	ShareCount int `json:"share_count"`
+	FileCount  int `json:"file_count"`
 }
 
 type ShareProgress struct {
@@ -92,15 +90,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	pendingIndexEvents, err := s.store.CountPendingIndexEvents(ctx)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	writeJSON(w, http.StatusOK, StatusResponse{
-		ShareCount:         shareCount,
-		FileCount:          fileCount,
-		PendingIndexEvents: pendingIndexEvents,
+		ShareCount: shareCount,
+		FileCount:  fileCount,
 	})
 }
 

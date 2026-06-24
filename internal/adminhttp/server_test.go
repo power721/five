@@ -18,15 +18,12 @@ type fakeStore struct {
 	shares         []model.Share
 	crawlShares    []model.Share
 	files          []model.File
-	events         []model.IndexEvent
 	shareCount     int
 	fileCount      int
-	eventCount     int
 	upsertedShares []model.Share
 	checkpoints    map[string]model.Checkpoint
 	listSharesErr  error
 	allFilesErr    error
-	eventsErr      error
 	reactivated    []string
 	deleted        []string
 	fileStats      map[string]fakeFileStats
@@ -73,17 +70,6 @@ func (f *fakeStore) ShareFileStats(_ context.Context, shareCode string) (int, in
 		return st.count, st.total, nil
 	}
 	return 0, 0, nil
-}
-
-func (f *fakeStore) PendingIndexEvents(context.Context, int) ([]model.IndexEvent, error) {
-	if f.eventsErr != nil {
-		return nil, f.eventsErr
-	}
-	return f.events, nil
-}
-
-func (f *fakeStore) CountPendingIndexEvents(context.Context) (int, error) {
-	return f.eventCount, nil
 }
 
 func (f *fakeStore) GetShare(_ context.Context, shareCode string) (model.Share, bool, error) {
@@ -236,14 +222,12 @@ func TestServerDeleteShare(t *testing.T) {
 	}
 }
 
-func TestStatusReturnsShareFileAndEventCounts(t *testing.T) {
+func TestStatusReturnsShareAndFileCounts(t *testing.T) {
 	store := &fakeStore{
 		shareCount:    2,
 		fileCount:     3,
-		eventCount:    2,
 		listSharesErr: errors.New("status must not load shares"),
 		allFilesErr:   errors.New("status must not load files"),
-		eventsErr:     errors.New("status must not load events"),
 	}
 	srv := New(store, nil)
 
@@ -263,9 +247,6 @@ func TestStatusReturnsShareFileAndEventCounts(t *testing.T) {
 	}
 	if body.FileCount != 3 {
 		t.Fatalf("file_count = %d, want 3", body.FileCount)
-	}
-	if body.PendingIndexEvents != 2 {
-		t.Fatalf("pending_index_events = %d, want 2", body.PendingIndexEvents)
 	}
 }
 

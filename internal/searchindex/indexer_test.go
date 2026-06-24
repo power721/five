@@ -2,12 +2,9 @@ package searchindex
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blevesearch/bleve/v2"
 
@@ -105,79 +102,25 @@ func TestRebuildFlushesBoundedBatchesAcrossRemainder(t *testing.T) {
 	}
 }
 
-type eventProvider struct {
-	files  map[string]model.File
-	events []model.IndexEvent
-}
-
-func (e *eventProvider) AllFiles(_ context.Context) ([]model.File, error) {
-	out := make([]model.File, 0, len(e.files))
-	for _, f := range e.files {
-		out = append(out, f)
-	}
-	return out, nil
-}
-
-func (e *eventProvider) PendingIndexEvents(_ context.Context, limit int) ([]model.IndexEvent, error) {
-	if len(e.events) < limit {
-		limit = len(e.events)
-	}
-	return append([]model.IndexEvent(nil), e.events[:limit]...), nil
-}
-
-func (e *eventProvider) MarkIndexEventsProcessed(_ context.Context, ids []int64) error {
-	keep := e.events[:0]
-	for _, ev := range e.events {
-		matched := false
-		for _, id := range ids {
-			if ev.ID == id {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			keep = append(keep, ev)
-		}
-	}
-	e.events = keep
-	return nil
-}
-
-func (e *eventProvider) FileByID(_ context.Context, fileID string) (model.File, bool, error) {
-	f, ok := e.files[fileID]
-	return f, ok, nil
-}
-
-func TestApplyPendingEventsIndexesNewFiles(t *testing.T) {
+// TestRebuildKeysDocsByShareCodeAndFileID guards the composite bleve doc id. The
+// 115 cid is NOT globally unique — one folder linked by several shares reuses a
+// single cid — so keying docs on the bare cid let one share's doc overwrite the
+// other's. With doc id "shareCode-fileId" both rows survive and each is
+// reachable under its own id; the consumer splits it back with
+// parseCompositeFileID.
+func TestRebuildKeysDocsByShareCodeAndFileID(t *testing.T) {
 	dir := t.TempDir()
 	builder := New(filepath.Join(dir, "bleve"))
-	provider := &eventProvider{
-		files: map[string]model.File{
-			"f1": {
-				FileID:    "f1",
-				ShareCode: "swf01d43zby",
-				Name:      "Avatar.2009.2160p.mkv",
-				Ext:       "mkv",
-			},
+	provider := staticProvider{
+		files: []model.File{
+			{FileID: "shared", ShareCode: "swA", Name: "fromA.mkv"},
+			{FileID: "shared", ShareCode: "swB", Name: "fromB.mkv"},
 		},
 	}
+
 	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
 	if err != nil {
-		t.Fatalf("initial rebuild: %v", err)
-	}
-
-	provider.files["f2"] = model.File{
-		FileID:    "f2",
-		ShareCode: "swf01d43zby",
-		Name:      "Born.with.Luck.S01E01.mp4",
-		Ext:       "mp4",
-	}
-	provider.events = []model.IndexEvent{
-		{ID: 1, FileID: "f2", Op: "upsert"},
-	}
-
-	if err := builder.ApplyPendingEvents(context.Background(), manifest.IndexPath, provider, 100); err != nil {
-		t.Fatalf("apply pending events: %v", err)
+		t.Fatalf("rebuild: %v", err)
 	}
 
 	index, err := bleve.Open(manifest.IndexPath)
@@ -186,216 +129,20 @@ func TestApplyPendingEventsIndexesNewFiles(t *testing.T) {
 	}
 	defer index.Close()
 
-	docCount, err := index.DocCount()
+	count, err := index.DocCount()
 	if err != nil {
 		t.Fatalf("doc count: %v", err)
 	}
-	if docCount != 2 {
-		t.Fatalf("doc count after events = %d, want 2", docCount)
+	if count != 2 {
+		t.Fatalf("doc count = %d, want 2 (shared cid must not collide)", count)
 	}
-
-	query := bleve.NewMatchQuery("Born.with.Luck.S01E01.mp4")
-	query.SetField("name")
-	req := bleve.NewSearchRequest(query)
-	req.Fields = []string{"name", "path", "ext"}
-	res, err := index.Search(req)
-	if err != nil {
-		t.Fatalf("search bleve: %v", err)
-	}
-	doc, err := index.Document("f2")
-	if err != nil {
-		t.Fatalf("load f2 document: %v", err)
-	}
-	if doc == nil {
-		t.Fatal("expected f2 document to exist")
-	}
-	if res.Total != 1 {
-		t.Fatalf("search total after events = %d, want 1", res.Total)
-	}
-	if len(provider.events) != 0 {
-		t.Fatalf("pending events = %d, want 0", len(provider.events))
-	}
-}
-
-type loopingEventProvider struct {
-	eventProvider
-	calls *atomic.Int32
-}
-
-func (l *loopingEventProvider) PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error) {
-	l.calls.Add(1)
-	return l.eventProvider.PendingIndexEvents(ctx, limit)
-}
-
-func TestRunEventLoopStopsWithContext(t *testing.T) {
-	dir := t.TempDir()
-	builder := New(filepath.Join(dir, "bleve"))
-	provider := &loopingEventProvider{
-		eventProvider: eventProvider{
-			files: map[string]model.File{
-				"f1": {
-					FileID:    "f1",
-					ShareCode: "swf01d43zby",
-					Name:      "Avatar.2009.2160p.mkv",
-					Ext:       "mkv",
-				},
-			},
-		},
-		calls: &atomic.Int32{},
-	}
-	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
-	if err != nil {
-		t.Fatalf("initial rebuild: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- builder.RunEventLoop(ctx, manifest.IndexPath, provider, 10, 10*time.Millisecond)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-done:
+	for _, id := range []string{"swA-shared", "swB-shared"} {
+		doc, err := index.Document(id)
 		if err != nil {
-			t.Fatalf("run event loop err: %v", err)
+			t.Fatalf("load %s: %v", id, err)
 		}
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("event loop did not stop on context cancel")
-	}
-	if provider.calls.Load() == 0 {
-		t.Fatal("expected event loop to poll pending events at least once")
-	}
-}
-
-func TestRunEventLoopDrainsBacklogBeforeSleeping(t *testing.T) {
-	dir := t.TempDir()
-	builder := New(filepath.Join(dir, "bleve"))
-	provider := &loopingEventProvider{
-		eventProvider: eventProvider{
-			files: map[string]model.File{
-				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Ext: "mkv"},
-				"f2": {FileID: "f2", ShareCode: "sw1", Name: "B.mkv", Ext: "mkv"},
-				"f3": {FileID: "f3", ShareCode: "sw1", Name: "C.mkv", Ext: "mkv"},
-			},
-			events: []model.IndexEvent{
-				{ID: 1, FileID: "f1", Op: "upsert"},
-				{ID: 2, FileID: "f2", Op: "upsert"},
-				{ID: 3, FileID: "f3", Op: "upsert"},
-			},
-		},
-		calls: &atomic.Int32{},
-	}
-	manifest, err := builder.Rebuild(context.Background(), staticProvider{}, 1, 1)
-	if err != nil {
-		t.Fatalf("initial rebuild: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- builder.RunEventLoop(ctx, manifest.IndexPath, provider, 1, time.Hour)
-	}()
-
-	deadline := time.After(200 * time.Millisecond)
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if len(provider.events) == 0 {
-			cancel()
-			break
+		if doc == nil {
+			t.Fatalf("expected document %q to exist (composite doc id)", id)
 		}
-		select {
-		case <-deadline:
-			cancel()
-			t.Fatalf("pending events were not drained before sleep; remaining=%d calls=%d", len(provider.events), provider.calls.Load())
-		case <-ticker.C:
-		}
-	}
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run event loop err: %v", err)
-		}
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("event loop did not stop after backlog drain")
-	}
-	if provider.calls.Load() < 3 {
-		t.Fatalf("pending event polls = %d, want at least 3", provider.calls.Load())
-	}
-}
-
-// flakyProvider fails PendingIndexEvents a fixed number of times before
-// succeeding, simulating a transient store error such as SQLITE_BUSY.
-type flakyProvider struct {
-	eventProvider
-	remainingFailures *atomic.Int32
-}
-
-func (f *flakyProvider) PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error) {
-	if f.remainingFailures.Load() > 0 {
-		f.remainingFailures.Add(-1)
-		return nil, errors.New("database is locked (5) (SQLITE_BUSY)")
-	}
-	return f.eventProvider.PendingIndexEvents(ctx, limit)
-}
-
-func TestRunEventLoopRetriesTransientErrors(t *testing.T) {
-	prevBackoff, prevMax := eventRetryBackoff, eventRetryMaxBackoff
-	eventRetryBackoff, eventRetryMaxBackoff = time.Millisecond, 5*time.Millisecond
-	defer func() { eventRetryBackoff, eventRetryMaxBackoff = prevBackoff, prevMax }()
-
-	dir := t.TempDir()
-	builder := New(filepath.Join(dir, "bleve"))
-	provider := &flakyProvider{
-		eventProvider: eventProvider{
-			files: map[string]model.File{
-				"f1": {FileID: "f1", ShareCode: "sw1", Name: "A.mkv", Ext: "mkv"},
-			},
-			events: []model.IndexEvent{{ID: 1, FileID: "f1", Op: "upsert"}},
-		},
-		remainingFailures: &atomic.Int32{},
-	}
-	provider.remainingFailures.Store(3)
-
-	manifest, err := builder.Rebuild(context.Background(), staticProvider{}, 1, 1)
-	if err != nil {
-		t.Fatalf("initial rebuild: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- builder.RunEventLoop(ctx, manifest.IndexPath, provider, 10, time.Hour)
-	}()
-
-	// The loop must survive the transient PendingIndexEvents failures and
-	// eventually drain the backlog instead of returning the error.
-	deadline := time.After(2 * time.Second)
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for len(provider.events) > 0 {
-		select {
-		case err := <-done:
-			t.Fatalf("event loop exited early with err=%v before draining (remaining failures=%d)", err, provider.remainingFailures.Load())
-		case <-deadline:
-			t.Fatalf("event loop did not drain backlog after transient errors; remaining=%d", len(provider.events))
-		case <-ticker.C:
-		}
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run event loop err: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("event loop did not stop after backlog drain")
 	}
 }

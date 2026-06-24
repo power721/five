@@ -197,14 +197,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			visited_json TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS index_event (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			file_id TEXT NOT NULL,
-			op TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			processed_at INTEGER
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_index_event_processed_id ON index_event(processed_at, id);`,
 		`CREATE TABLE IF NOT EXISTS index_manifest (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			version INTEGER NOT NULL,
@@ -231,12 +223,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		{name: "group_id", ddl: "INTEGER"},
 	}); err != nil {
 		return fmt.Errorf("migrate share columns: %w", err)
-	}
-	if err := s.purgeAbandonedIndexEvents(ctx); err != nil {
-		return fmt.Errorf("purge abandoned index events: %w", err)
-	}
-	if err := s.coalescePendingIndexEvents(ctx); err != nil {
-		return fmt.Errorf("coalesce pending index events: %w", err)
 	}
 	if err := s.dropLegacyColumns(ctx); err != nil {
 		return fmt.Errorf("drop legacy columns: %w", err)
@@ -359,23 +345,6 @@ WHERE NOT EXISTS (SELECT 1 FROM file own WHERE own.share_code = victim.share_cod
 	return s.SaveKV(ctx, "file_stolen_roots_repaired", "1")
 }
 
-// purgeAbandonedIndexEvents clears the incremental-index event backlog exactly
-// once. The daemon no longer consumes these events (the index is rebuilt
-// locally), and generation is gated off, so any pre-existing rows are orphaned.
-// Gated by kv so it runs only on the first open of a given database after this
-// change; afterwards the table stays empty and this is a cheap no-op skip.
-func (s *Store) purgeAbandonedIndexEvents(ctx context.Context) error {
-	if _, ok, err := s.LoadKV(ctx, "index_events_purged"); err != nil {
-		return err
-	} else if ok {
-		return nil
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM index_event;`); err != nil {
-		return err
-	}
-	return s.SaveKV(ctx, "index_events_purged", "1")
-}
-
 // dropLegacyColumns removes columns that were dropped from the schema. SQLite
 // requires a column's index to be dropped first, so each entry may name an
 // index to remove beforehand. Only runs on databases that still carry the
@@ -479,29 +448,6 @@ func (s *Store) ensureColumns(ctx context.Context, table string, cols []columnDe
 	return nil
 }
 
-func (s *Store) coalescePendingIndexEvents(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE index_event
-		SET processed_at = unixepoch()
-		WHERE processed_at IS NULL
-			AND op = 'upsert'
-			AND id NOT IN (
-				SELECT MIN(id)
-				FROM index_event
-				WHERE processed_at IS NULL AND op = 'upsert'
-				GROUP BY file_id
-			);`)
-	return err
-}
-
-// indexEventsEnabled gates whether UpsertFiles queues incremental index_event
-// rows. It is OFF in production: the daemon no longer runs the index event loop
-// (it could not keep up with crawl throughput at this scale, so pending events
-// grew without ever being drained), and the search index is rebuilt locally via
-// rebuild-index instead. The generation path is retained and exercised by tests
-// that flip this on, so the capability can be re-enabled if incremental indexing
-// is revisited. Package-level var (not const) so tests can toggle it.
-var indexEventsEnabled = false
-
 func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -522,74 +468,19 @@ func (s *Store) UpsertFiles(ctx context.Context, files []model.File) error {
 		sha1=excluded.sha1,
 		updated_at=excluded.updated_at,
 		crawled_at=excluded.crawled_at;`
-	eventStmt := `INSERT INTO index_event(file_id, op, created_at)
-		SELECT ?, 'upsert', ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM index_event WHERE file_id = ? AND op = 'upsert' AND processed_at IS NULL
-		);`
-	currentStmt := `SELECT share_code, parent_id, name, ext, is_dir, depth FROM file WHERE file_id = ?;`
 
 	for _, f := range files {
 		isDir := 0
 		if f.IsDir {
 			isDir = 1
 		}
-		// Detect a change against the PRE-upsert row (must run before the upsert
-		// below, otherwise the just-written row matches f and nothing ever queues).
-		var needsIndexEvent bool
-		if indexEventsEnabled {
-			changed, err := shouldQueueIndexEvent(ctx, tx, currentStmt, f, isDir)
-			if err != nil {
-				return err
-			}
-			needsIndexEvent = changed
-		}
 		if _, err := tx.ExecContext(ctx, upsertStmt,
 			f.FileID, f.ShareCode, f.ParentID, f.Name, f.Ext, f.Size, isDir, f.Depth, f.SHA1, f.UpdatedAt, f.CrawledAt,
 		); err != nil {
 			return err
 		}
-		if needsIndexEvent {
-			if _, err := tx.ExecContext(ctx, eventStmt, f.FileID, f.CrawledAt, f.FileID); err != nil {
-				return err
-			}
-		}
 	}
 	return tx.Commit()
-}
-
-func shouldQueueIndexEvent(ctx context.Context, tx *sql.Tx, stmt string, f model.File, isDir int) (bool, error) {
-	var current struct {
-		ShareCode string
-		ParentID  string
-		Name      string
-		Ext       string
-		IsDir     int
-		Depth     int
-	}
-	err := tx.QueryRowContext(ctx, stmt, f.FileID).Scan(
-		&current.ShareCode,
-		&current.ParentID,
-		&current.Name,
-		&current.Ext,
-		&current.IsDir,
-		&current.Depth,
-	)
-	if err == sql.ErrNoRows {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if current.ShareCode != f.ShareCode ||
-		current.ParentID != f.ParentID ||
-		current.Name != f.Name ||
-		current.Ext != f.Ext ||
-		current.IsDir != isDir ||
-		current.Depth != f.Depth {
-		return true, nil
-	}
-	return false, nil
 }
 
 func (s *Store) AllFiles(ctx context.Context) ([]model.File, error) {
@@ -678,46 +569,6 @@ func (s *Store) LoadCheckpoint(ctx context.Context, shareCode string) (model.Che
 		return model.Checkpoint{}, false, err
 	}
 	return cp, true, nil
-}
-
-func (s *Store) PendingIndexEvents(ctx context.Context, limit int) ([]model.IndexEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, file_id, op FROM index_event WHERE processed_at IS NULL ORDER BY id ASC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var events []model.IndexEvent
-	for rows.Next() {
-		var e model.IndexEvent
-		if err := rows.Scan(&e.ID, &e.FileID, &e.Op); err != nil {
-			return nil, err
-		}
-		events = append(events, e)
-	}
-	return events, rows.Err()
-}
-
-func (s *Store) CountPendingIndexEvents(ctx context.Context) (int, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_event WHERE processed_at IS NULL`)
-	var count int
-	if err := row.Scan(&count); err != nil {
-		return 0, err
-	}
-	return count, nil
-}
-
-func (s *Store) MarkIndexEventsProcessed(ctx context.Context, ids []int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE index_event SET processed_at = unixepoch() WHERE id = ?`, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 func (s *Store) UpdateManifest(ctx context.Context, m model.IndexManifest) error {
