@@ -113,14 +113,18 @@ func folderNames(d model.File, kids []model.File) []string {
 
 // planDocs groups files into the bleve documents Rebuild should index.
 //
-// Real-hash files are grouped into episodes or movies. Episodes (isEpisodeFile)
-// key on (name, sha1, size) so each distinct filename is its own doc. Movies key
-// on (sha1, size) so differently-named copies merge into a single doc carrying
-// every name (recall). Within a group the representative is the
-// lexicographically smallest (share_code, file_id) row; its composite id is the
-// doc id. Directories, unhashed files, and the empty-string-hash sentinel are
-// passthrough — one doc each. Output is deterministic for a given input:
-// passthrough rows in input order, then groups in first-seen order, names sorted.
+// Folder rollup: a folder classified as an episode container (isContainer) gets
+// one doc carrying its own name plus its direct child file stems (folderNames),
+// and its direct child files are suppressed — so a series search returns the
+// folder, not dozens of episodes. Non-container folders are passthrough (name
+// only). Remaining (non-suppressed) real-hash files are content-deduped as
+// before: episodes (isEpisodeFile) key on (name, sha1, size) so each distinct
+// filename is its own doc; movies key on (sha1, size) so differently-named copies
+// merge into one doc carrying every name. Within a group the representative is
+// the lexicographically smallest (share_code, file_id) row; its composite id is
+// the doc id. Unhashed files and the empty-string-hash sentinel are passthrough.
+// Every indexed name uses the file stem (stem). Output is deterministic for a
+// given input.
 func planDocs(files []model.File) []indexedDoc {
 	type groupKey struct {
 		name string // "" for movies (merge across names)
@@ -131,15 +135,59 @@ func planDocs(files []model.File) []indexedDoc {
 		rep   model.File
 		names map[string]struct{}
 	}
+
+	// Partition rows into dirs and files; index each file under its parent folder
+	// (parent_id is share-scoped) so dirs can be classified as containers.
+	var dirs []model.File
+	childrenOf := map[[2]string][]model.File{} // (share_code, parent_id) -> direct child files
+	for _, f := range files {
+		if f.IsDir {
+			dirs = append(dirs, f)
+			continue
+		}
+		key := [2]string{f.ShareCode, f.ParentID}
+		childrenOf[key] = append(childrenOf[key], f)
+	}
+
+	out := make([]indexedDoc, 0, len(files))
+
+	// Folder docs first. Containers absorb their direct child file stems and
+	// suppress those files; non-containers are passthrough (stem of a dir is its
+	// verbatim name).
+	suppressed := map[[2]string]bool{} // (share_code, file_id) rolled into a folder
+	for _, d := range dirs {
+		kids := childrenOf[[2]string{d.ShareCode, d.FileID}]
+		if isContainer(kids) {
+			out = append(out, indexedDoc{
+				docID: docID(d.ShareCode, d.FileID),
+				names: folderNames(d, kids),
+			})
+			for _, k := range kids {
+				suppressed[[2]string{k.ShareCode, k.FileID}] = true
+			}
+		} else {
+			out = append(out, indexedDoc{
+				docID: docID(d.ShareCode, d.FileID),
+				names: []string{stem(d)},
+			})
+		}
+	}
+
+	// File docs: existing content-dedup over non-suppressed real-hash files;
+	// unhashed / sentinel rows are passthrough. Indexed names use the stem.
 	groups := map[groupKey]*group{}
 	var order []groupKey
-	passthrough := make([]indexedDoc, 0)
-
 	for _, f := range files {
-		if f.IsDir || f.SHA1 == "" || f.SHA1 == emptyStringHash {
-			passthrough = append(passthrough, indexedDoc{
+		if f.IsDir {
+			continue
+		}
+		if suppressed[[2]string{f.ShareCode, f.FileID}] {
+			continue
+		}
+		if f.SHA1 == "" || f.SHA1 == emptyStringHash {
+			out = append(out, indexedDoc{
 				docID: docID(f.ShareCode, f.FileID),
-				names: []string{f.Name},
+				names: []string{stem(f)},
 			})
 			continue
 		}
@@ -153,14 +201,11 @@ func planDocs(files []model.File) []indexedDoc {
 			groups[key] = g
 			order = append(order, key)
 		}
-		g.names[f.Name] = struct{}{}
+		g.names[stem(f)] = struct{}{}
 		if f.ShareCode < g.rep.ShareCode || (f.ShareCode == g.rep.ShareCode && f.FileID < g.rep.FileID) {
 			g.rep = f
 		}
 	}
-
-	out := make([]indexedDoc, 0, len(passthrough)+len(order))
-	out = append(out, passthrough...)
 	for _, key := range order {
 		g := groups[key]
 		names := make([]string, 0, len(g.names))

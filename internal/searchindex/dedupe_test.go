@@ -216,3 +216,106 @@ func TestFolderNames(t *testing.T) {
 		}
 	})
 }
+
+func TestPlanDocsRollsUpMarkerContainer(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	files := []model.File{
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "剧", IsDir: true},
+		{FileID: "d2", ShareCode: "sw1", ParentID: "d1", Name: "第一季", IsDir: true},
+		{FileID: "e1", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E01.mkv", Ext: "mkv", SHA1: "H1", Size: 2 * gb},
+		{FileID: "e2", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E02.mkv", Ext: "mkv", SHA1: "H2", Size: 2 * gb},
+		{FileID: "e3", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E03.mkv", Ext: "mkv", SHA1: "H3", Size: 2 * gb},
+		{FileID: "e4", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E04.mkv", Ext: "mkv", SHA1: "H4", Size: 2 * gb},
+		{FileID: "e5", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E05.mkv", Ext: "mkv", SHA1: "H5", Size: 2 * gb},
+	}
+	got := planDocs(files)
+	if len(got) != 2 {
+		t.Fatalf("got %d docs, want 2 (root + season; episodes rolled into season)", len(got))
+	}
+	want := map[string][]string{
+		"sw1-d1": {"剧"},
+		"sw1-d2": {"Show.S01E01", "Show.S01E02", "Show.S01E03", "Show.S01E04", "Show.S01E05", "第一季"},
+	}
+	gotMap := map[string][]string{}
+	for _, d := range got {
+		gotMap[d.docID] = d.names
+	}
+	for id, names := range want {
+		if !reflect.DeepEqual(gotMap[id], names) {
+			t.Errorf("doc %s names = %v, want %v", id, gotMap[id], names)
+		}
+	}
+}
+
+func TestPlanDocsRollsUpMarkerLessContainer(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	files := []model.File{
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "剧", IsDir: true},
+		{FileID: "c1", ShareCode: "sw1", ParentID: "d1", Name: "01.mkv", Ext: "mkv", SHA1: "H1", Size: 1 * gb},
+		{FileID: "c2", ShareCode: "sw1", ParentID: "d1", Name: "02.mkv", Ext: "mkv", SHA1: "H2", Size: 1 * gb},
+		{FileID: "c3", ShareCode: "sw1", ParentID: "d1", Name: "03.mkv", Ext: "mkv", SHA1: "H3", Size: 1 * gb},
+		{FileID: "c4", ShareCode: "sw1", ParentID: "d1", Name: "04.mkv", Ext: "mkv", SHA1: "H4", Size: 1 * gb},
+		{FileID: "c5", ShareCode: "sw1", ParentID: "d1", Name: "05.mkv", Ext: "mkv", SHA1: "H5", Size: 1 * gb},
+	}
+	got := planDocs(files)
+	// d1 is a container (5 small files); c1..c5 suppressed.
+	if len(got) != 1 {
+		t.Fatalf("got %d docs, want 1 (folder absorbed 5 marker-less episodes)", len(got))
+	}
+	if got[0].docID != "sw1-d1" {
+		t.Errorf("docID = %q, want sw1-d1", got[0].docID)
+	}
+	want := []string{"01", "02", "03", "04", "05", "剧"}
+	if !reflect.DeepEqual(got[0].names, want) {
+		t.Errorf("names = %v, want %v", got[0].names, want)
+	}
+}
+
+func TestPlanDocsDoesNotRollUpCollection(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	files := []model.File{
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "合集", IsDir: true},
+		{FileID: "m1", ShareCode: "sw1", ParentID: "d1", Name: "A.2160p.mkv", Ext: "mkv", SHA1: "H1", Size: 40 * gb},
+		{FileID: "m2", ShareCode: "sw1", ParentID: "d1", Name: "B.2160p.mkv", Ext: "mkv", SHA1: "H2", Size: 40 * gb},
+		{FileID: "m3", ShareCode: "sw1", ParentID: "d1", Name: "C.2160p.mkv", Ext: "mkv", SHA1: "H3", Size: 40 * gb},
+	}
+	got := planDocs(files)
+	// d1 not a container (3 large, <5 files) -> passthrough dir + 3 movie docs
+	if len(got) != 4 {
+		t.Fatalf("got %d docs, want 4 (folder passthrough + 3 movies, not rolled up)", len(got))
+	}
+}
+
+func TestPlanDocsDoesNotRollUpSingleMovie(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	files := []model.File{
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "阿凡达3", IsDir: true},
+		{FileID: "f1", ShareCode: "sw1", ParentID: "d1", Name: "阿凡达3.2025.mkv", Ext: "mkv", SHA1: "H1", Size: 40 * gb},
+	}
+	got := planDocs(files)
+	// single movie: dir passthrough + 1 movie doc (NOT rolled up)
+	if len(got) != 2 {
+		t.Fatalf("got %d docs, want 2 (folder passthrough + movie file)", len(got))
+	}
+}
+
+func TestPlanDocsSuppressesFilesExcludedFromDedup(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	// The same content (sha1 H1) appears as a container child (suppressed) and as
+	// a loose root-level episode. The loose copy is still indexed; the suppressed
+	// copy is NOT double-emitted.
+	files := []model.File{
+		{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "剧", IsDir: true},
+		{FileID: "e1", ShareCode: "sw1", ParentID: "d1", Name: "Show.S01E01.mkv", Ext: "mkv", SHA1: "H1", Size: 2 * gb},
+		{FileID: "e2", ShareCode: "sw1", ParentID: "d1", Name: "Show.S01E02.mkv", Ext: "mkv", SHA1: "H2", Size: 2 * gb},
+		{FileID: "e3", ShareCode: "sw1", ParentID: "d1", Name: "Show.S01E03.mkv", Ext: "mkv", SHA1: "H3", Size: 2 * gb},
+		{FileID: "e4", ShareCode: "sw1", ParentID: "d1", Name: "Show.S01E04.mkv", Ext: "mkv", SHA1: "H4", Size: 2 * gb},
+		{FileID: "e5", ShareCode: "sw1", ParentID: "d1", Name: "Show.S01E05.mkv", Ext: "mkv", SHA1: "H1", Size: 2 * gb},
+		{FileID: "loose", ShareCode: "sw1", ParentID: "0", Name: "Show.S01E01.mkv", Ext: "mkv", SHA1: "H1", Size: 2 * gb},
+	}
+	got := planDocs(files)
+	// Expect exactly: 1 container folder doc (d1) + 1 loose episode doc.
+	if len(got) != 2 {
+		t.Fatalf("got %d docs, want 2 (container folder + loose copy; suppressed copy not double-emitted)", len(got))
+	}
+}
