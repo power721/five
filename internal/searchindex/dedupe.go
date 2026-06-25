@@ -55,6 +55,29 @@ func isEpisodeFile(f model.File) bool {
 	return episodeMarker.MatchString(f.Name) || f.Size <= movieSizeThreshold
 }
 
+// isContainer reports whether a folder should roll its direct child files up
+// into its own search doc — i.e. it is an episode container. It needs ≥5
+// episode-like children: ≥5 marker children (S01E01/EP09/第N集), or ≥5 files
+// that are ≥60% small (0 < size ≤ movieSizeThreshold) with <2 large. Small 2–4
+// episode folders don't flood search, so they stay as individual files. kids are
+// the folder's DIRECT child files only; subfolders are classified independently.
+// 0.6 is compared as small*5 >= files*3 to avoid floating point.
+func isContainer(kids []model.File) bool {
+	var markers, files, small, large int
+	for _, k := range kids {
+		files++
+		if episodeMarker.MatchString(k.Name) {
+			markers++
+		}
+		if k.Size > movieSizeThreshold {
+			large++
+		} else if k.Size > 0 {
+			small++
+		}
+	}
+	return markers >= 5 || (files >= 5 && small*5 >= files*3 && large < 2)
+}
+
 // planDocs groups files into the bleve documents Rebuild should index.
 //
 // Real-hash files are grouped into episodes or movies. Episodes (isEpisodeFile)

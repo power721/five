@@ -133,3 +133,35 @@ func TestStem(t *testing.T) {
 		}
 	}
 }
+
+func TestIsContainer(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	mk := func(name string, size int64) model.File { return model.File{Name: name, Size: size} }
+	// 5 marker episodes
+	marker5 := []model.File{mk("S01E01.mkv", 2*gb), mk("S01E02.mkv", 2*gb), mk("S01E03.mkv", 2*gb), mk("S01E04.mkv", 2*gb), mk("S01E05.mkv", 2*gb)}
+	// 5 small no-marker files (>=60% small)
+	small5 := []model.File{mk("01.mkv", 1*gb), mk("02.mkv", 1*gb), mk("03.mkv", 1*gb), mk("04.mkv", 1*gb), mk("05.mkv", 1*gb)}
+	// 4 markers (below floor)
+	marker4 := marker5[:4]
+	// 3 large movies (collection)
+	large3 := []model.File{mk("A.2160p.mkv", 40*gb), mk("B.2160p.mkv", 40*gb), mk("C.2160p.mkv", 40*gb)}
+	// mixed: 5 files but 3 large, 2 small (<60% small)
+	mixed := []model.File{mk("x.mkv", 1*gb), mk("y.mkv", 1*gb), mk("a.2160p.mkv", 40*gb), mk("b.2160p.mkv", 40*gb), mk("c.2160p.mkv", 40*gb)}
+	cases := []struct {
+		label string
+		kids  []model.File
+		want  bool
+	}{
+		{"5 markers", marker5, true},
+		{"5 small no markers", small5, true},
+		{"4 markers below floor", marker4, false},
+		{"empty", nil, false},
+		{"3 large collection", large3, false},
+		{"5 files but 3 large", mixed, false},
+	}
+	for _, c := range cases {
+		if got := isContainer(c.kids); got != c.want {
+			t.Errorf("%s: isContainer=%v, want %v", c.label, got, c.want)
+		}
+	}
+}
