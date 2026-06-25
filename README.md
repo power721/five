@@ -76,6 +76,9 @@ Useful endpoints while running:
 - `GET /shares` on `admin-addr`: all registered shares with current status and failure state
 - `GET /shares/<share_code>` on `admin-addr`: one share's detailed progress, including checkpoint queue size, visited count, and next page offset
 - `POST /shares` on `admin-addr`: add a new share task while the service is running
+- `POST /crawler/pause` on `admin-addr`: stop scheduling crawls. The in-flight share finishes its current page and writes its checkpoint, then the loop parks until resumed; nothing is recorded as a failure. Idempotent.
+- `POST /crawler/resume` on `admin-addr`: resume crawling from the last checkpoint
+- `GET /crawler/state` on `admin-addr`: current crawler state — `{"state":"running"}` or `{"state":"paused"}`
 
 Example:
 
@@ -90,6 +93,15 @@ Batch import from `115_shares.txt`:
 ```bash
 curl -X POST http://127.0.0.1:8080/shares \
   -F 'file=@115_shares.txt'
+```
+
+Pause and resume the crawler without restarting the daemon (state is in-memory
+and resets to `running` on restart):
+
+```bash
+curl -X POST http://127.0.0.1:8080/crawler/pause   # -> {"state":"paused"}
+curl http://127.0.0.1:8080/crawler/state            # -> {"state":"paused"}
+curl -X POST http://127.0.0.1:8080/crawler/resume   # -> {"state":"running"}
 ```
 
 Rebuild the Bleve index from SQLite:
