@@ -177,7 +177,7 @@ func TestFolderNames(t *testing.T) {
 			{FileID: "e1b", ShareCode: "sw1", Name: "Show.S01E01.avi", Ext: "avi", Size: 2 * gb}, // dup stem
 		}
 		got := folderNames(d, kids)
-		want := []string{"Show.S01E01", "Show.S01E03", "第一季"}
+		want := []string{"Show S01E01", "Show S01E03", "第一季"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("folderNames=%v, want %v", got, want)
 		}
@@ -215,6 +215,21 @@ func TestFolderNames(t *testing.T) {
 			t.Errorf("folder name %q not retained after cap", d.Name)
 		}
 	})
+	t.Run("normalizes_dots_so_segments_are_searchable", func(t *testing.T) {
+		// bleve keeps "Show.S01E01" (letter·MidNumLet·letter) as one token, so a
+		// bare "Show" search would miss the absorbed stem. folderNames replaces
+		// dots with spaces so each segment is its own searchable token.
+		d := model.File{Name: "第一季", ShareCode: "sw1", FileID: "d1", IsDir: true}
+		kids := []model.File{
+			{Name: "Show.S01E01.mkv", Ext: "mkv"},
+			{Name: "Show.S01E02.mkv", Ext: "mkv"},
+		}
+		got := folderNames(d, kids)
+		want := []string{"Show S01E01", "Show S01E02", "第一季"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("folderNames=%v, want %v", got, want)
+		}
+	})
 }
 
 func TestPlanDocsRollsUpMarkerContainer(t *testing.T) {
@@ -234,7 +249,7 @@ func TestPlanDocsRollsUpMarkerContainer(t *testing.T) {
 	}
 	want := map[string][]string{
 		"sw1-d1": {"剧"},
-		"sw1-d2": {"Show.S01E01", "Show.S01E02", "Show.S01E03", "Show.S01E04", "Show.S01E05", "第一季"},
+		"sw1-d2": {"Show S01E01", "Show S01E02", "Show S01E03", "Show S01E04", "Show S01E05", "第一季"},
 	}
 	gotMap := map[string][]string{}
 	for _, d := range got {

@@ -84,15 +84,22 @@ func isContainer(kids []model.File) bool {
 }
 
 // folderNames returns the distinct names to index for a rolled-up folder: the
-// folder's own name (always kept, verbatim) plus its direct child stems, sorted
-// and capped at maxFolderNames total. Child stems equal to the folder name are
-// deduped; when capped, the smallest child stems by sort are kept alongside the
-// folder name.
+// folder's own name (always kept) plus its direct child stems, sorted and capped
+// at maxFolderNames total. Child stems equal to the folder name are deduped;
+// when capped, the smallest child stems by sort are kept alongside the folder
+// name.
+//
+// Dots are turned into spaces: bleve's standard analyzer keeps "Show.S01E01"
+// (letter·MidNumLet·letter per UAX#29) as a single token, so a bare "Show"
+// search would miss an absorbed episode name. With dots as spaces each segment
+// ("Show", "S01E01") becomes its own searchable token.
 func folderNames(d model.File, kids []model.File) []string {
-	seen := map[string]struct{}{d.Name: {}}
+	norm := func(s string) string { return strings.ReplaceAll(s, ".", " ") }
+	folderName := norm(d.Name)
+	seen := map[string]struct{}{folderName: {}}
 	var childStems []string
 	for _, k := range kids {
-		s := stem(k)
+		s := norm(stem(k))
 		if _, ok := seen[s]; !ok {
 			seen[s] = struct{}{}
 			childStems = append(childStems, s)
@@ -106,7 +113,7 @@ func folderNames(d model.File, kids []model.File) []string {
 		}
 		names = append(names, s)
 	}
-	names = append(names, d.Name)
+	names = append(names, folderName)
 	sort.Strings(names)
 	return names
 }
