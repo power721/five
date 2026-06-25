@@ -218,3 +218,97 @@ func TestRebuildKeepsDifferentlyNamedEpisodesSeparate(t *testing.T) {
 		t.Fatalf("doc count = %d, want 2 (episodes with different names stay separate)", count)
 	}
 }
+
+// TestRebuildRollsUpEpisodesIntoContainerFolder guards the folder rollup end to
+// end: a season folder with >=5 marker episodes becomes ONE doc carrying the
+// episode stems; the episodes are not separate docs, and an episode-code search
+// hits the folder (not a file).
+func TestRebuildRollsUpEpisodesIntoContainerFolder(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := staticProvider{
+		files: []model.File{
+			{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "剧", IsDir: true},
+			{FileID: "d2", ShareCode: "sw1", ParentID: "d1", Name: "第一季", IsDir: true},
+			{FileID: "e1", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E01.mkv", Ext: "mkv", SHA1: "H1", Size: 2 * gb},
+			{FileID: "e2", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E02.mkv", Ext: "mkv", SHA1: "H2", Size: 2 * gb},
+			{FileID: "e3", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E03.mkv", Ext: "mkv", SHA1: "H3", Size: 2 * gb},
+			{FileID: "e4", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E04.mkv", Ext: "mkv", SHA1: "H4", Size: 2 * gb},
+			{FileID: "e5", ShareCode: "sw1", ParentID: "d2", Name: "Show.S01E05.mkv", Ext: "mkv", SHA1: "H5", Size: 2 * gb},
+		},
+	}
+	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	index, err := bleve.Open(manifest.IndexPath)
+	if err != nil {
+		t.Fatalf("open bleve: %v", err)
+	}
+	defer index.Close()
+
+	count, err := index.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("doc count = %d, want 2 (root + season; 5 episodes rolled into season)", count)
+	}
+
+	// Searching the show name hits the season folder (its absorbed episode
+	// names), not a file.
+	req := bleve.NewSearchRequest(bleve.NewMatchQuery("Show"))
+	res, err := index.Search(req)
+	if err != nil {
+		t.Fatalf("search Show: %v", err)
+	}
+	if res.Total != 1 {
+		t.Fatalf("search Show total = %d, want 1 (the season folder)", res.Total)
+	}
+	if res.Hits[0].ID != "sw1-d2" {
+		t.Errorf("hit id = %q, want sw1-d2 (season folder)", res.Hits[0].ID)
+	}
+}
+
+// TestRebuildDoesNotRollUpMovieCollection guards the converse: a folder of large
+// movies (no markers, <5 files) is NOT a container, so the movies stay as
+// separate docs and the folder is just a passthrough entry.
+func TestRebuildDoesNotRollUpMovieCollection(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := staticProvider{
+		files: []model.File{
+			{FileID: "d1", ShareCode: "sw1", ParentID: "0", Name: "合集", IsDir: true},
+			{FileID: "m1", ShareCode: "sw1", ParentID: "d1", Name: "AvatarA.2160p.mkv", Ext: "mkv", SHA1: "H1", Size: 40 * gb},
+			{FileID: "m2", ShareCode: "sw1", ParentID: "d1", Name: "AvatarB.2160p.mkv", Ext: "mkv", SHA1: "H2", Size: 40 * gb},
+			{FileID: "m3", ShareCode: "sw1", ParentID: "d1", Name: "AvatarC.2160p.mkv", Ext: "mkv", SHA1: "H3", Size: 40 * gb},
+		},
+	}
+	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	index, err := bleve.Open(manifest.IndexPath)
+	if err != nil {
+		t.Fatalf("open bleve: %v", err)
+	}
+	defer index.Close()
+
+	count, err := index.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("doc count = %d, want 4 (folder passthrough + 3 movies)", count)
+	}
+	req := bleve.NewSearchRequest(bleve.NewMatchQuery("AvatarB"))
+	res, err := index.Search(req)
+	if err != nil {
+		t.Fatalf("search AvatarB: %v", err)
+	}
+	if res.Total != 1 {
+		t.Errorf("search AvatarB total = %d, want 1 (the movie file)", res.Total)
+	}
+}
