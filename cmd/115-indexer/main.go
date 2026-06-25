@@ -377,6 +377,25 @@ func main() {
 		} else {
 			fmt.Fprintf(os.Stdout, "marked %d duplicate share(s)\n", len(actions))
 		}
+	case "cleanup-orphans":
+		orphans, err := s.OrphanShares(ctx)
+		if err != nil {
+			log.Fatalf("list orphans: %v", err)
+		}
+		var total int64
+		for _, o := range orphans {
+			fmt.Fprintf(os.Stdout, "orphan share=%s files=%d\n", o.ShareCode, o.FileCount)
+			total += o.FileCount
+		}
+		if !*apply {
+			fmt.Fprintf(os.Stdout, "%d orphan share(s), %d orphan files (dry-run; pass -apply to delete)\n", len(orphans), total)
+		} else {
+			n, derr := s.DeleteOrphans(ctx)
+			if derr != nil {
+				log.Fatalf("delete orphans: %v", derr)
+			}
+			fmt.Fprintf(os.Stdout, "deleted %d orphan rows (files + checkpoints)\n", n)
+		}
 	default:
 		log.Fatalf("unsupported mode %q", *mode)
 	}
