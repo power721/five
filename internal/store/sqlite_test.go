@@ -965,3 +965,52 @@ func TestMigrateAddsDuplicateOfColumn(t *testing.T) {
 		t.Fatalf("duplicate_of type = %q, want TEXT", typ)
 	}
 }
+
+func TestExportTrimmedPrunesDuplicateAndDead(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+	for _, sh := range []model.Share{
+		{ShareCode: "alive", ReceiveCode: "p", Status: "ACTIVE"},
+		{ShareCode: "dead", ReceiveCode: "p", Status: "DEAD"},
+		{ShareCode: "dup", ReceiveCode: "p", Status: "DUPLICATE"},
+	} {
+		if err := s.UpsertShare(ctx, sh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		`INSERT INTO file(file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, crawled_at) VALUES('fa','alive','0','a.mkv','mkv',1,0,1,'',1)`,
+		`INSERT INTO file(file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, crawled_at) VALUES('fd','dead','0','d.mkv','mkv',1,0,1,'',1)`,
+		`INSERT INTO file(file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, crawled_at) VALUES('fx','dup','0','x.mkv','mkv',1,0,1,'',1)`,
+	} {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, dest); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	d, err := sql.Open("sqlite", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for _, code := range []string{"dead", "dup"} {
+		var n int
+		if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM share WHERE share_code=?`, code).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("share %s survived export, want pruned", code)
+		}
+	}
+	var n int
+	if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM share WHERE share_code='alive'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("alive share = %d, want 1", n)
+	}
+}

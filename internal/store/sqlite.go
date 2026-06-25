@@ -114,14 +114,14 @@ func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
 			return fmt.Errorf("trim %q: %w", stmt, err)
 		}
 	}
-	// Prune dead shares and the files that belonged to them before vacuuming.
-	// Order matters: files reference share_code, so delete them first.
+	// Prune dead and duplicate shares and the files that belonged to them before
+	// vacuuming. Order matters: files reference share_code, so delete them first.
 	for _, stmt := range []string{
-		`DELETE FROM file WHERE share_code IN (SELECT share_code FROM share WHERE status = 'DEAD');`,
-		`DELETE FROM share WHERE status = 'DEAD';`,
+		`DELETE FROM file WHERE share_code IN (SELECT share_code FROM share WHERE status IN ('DEAD','DUPLICATE'));`,
+		`DELETE FROM share WHERE status IN ('DEAD','DUPLICATE');`,
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("prune dead shares %q: %w", stmt, err)
+			return fmt.Errorf("prune dead/duplicate shares %q: %w", stmt, err)
 		}
 	}
 	// The file table ships to consumers; strip crawled_at (crawler bookkeeping
