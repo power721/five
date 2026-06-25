@@ -4,8 +4,10 @@ set -euo pipefail
 echo "building..."
 go build -o five ./cmd/115-indexer/
 
+if [ $# -eq 0 ]; then
 echo "downloading..."
 scp ubuntu@YOUR_SERVER_IP:~/115.index.zip 115-index.db.zip
+fi
 
 ls -lh *.zip
 rm -rf data/
