@@ -3,15 +3,18 @@
 ## Goal
 
 Collapse duplicate files in search results with two regimes:
-- **Movies / single-play units** (large files): dedup by content alone —
-  differently-named copies of the same movie merge into one result, carrying
-  every name so any of them still matches.
-- **TV episodes** (small files): dedup by name AND content — differently-named
-  copies stay separate, because users play series as folder playlists where the
-  filename IS the episode identity and merging names would mix conventions.
+- **Movies / single-play units**: dedup by content alone — differently-named
+  copies of the same movie merge into one result, carrying every name so any of
+  them still matches.
+- **TV episodes**: dedup by name AND content — differently-named copies stay
+  separate, because users play series as folder playlists where the filename IS
+  the episode identity and merging names would mix conventions.
 
-The use case driving the split: TV-series folder playback. Same-name
-same-content copies (the egregious 330× cases) collapse under both regimes.
+A file is an **episode** if its name matches an episode pattern (`S02E18`,
+`EP09`, `第18集`, bare `E09`) OR it is small (`size ≤ 10 GiB`). Otherwise
+(large, no episode marker) it is a **movie**. The marker overrides size so a
+big 4K episode is never merged as a movie. Same-name same-content copies (the
+egregious 330× cases) collapse under both regimes.
 
 ## Context / Data (measured on the live `data/index.db`)
 
@@ -21,17 +24,11 @@ same-content copies (the egregious 330× cases) collapse under both regimes.
   **file rows cannot be dropped** — every copy must stay. Dedup is purely a
   search-result concern; folder/playlist playback is untouched regardless.
 - **Alias groups** (same content, >1 distinct name) split bimodally by size:
-
-  | size band | % of alias groups | content |
-  |---|---|---|
-  | >30 GB | 26.7% | concert ISOs, 4K remux movies |
-  | 15–30 GB | 14.5% | concerts, 4K movies |
-  | 8–15 GB | 1.8% | mixed (concert discs + few movies) |
-  | 4–8 GB | 3.4% | mixed |
-  | ≤4 GB | **53.6%** | TV episodes |
-
-- **Only 1.1% of >15 GB files look like episodes** (2,667 / 243,852); 98.9% are
-  concerts/movies. So treating `size > 15 GB` as "movie" rarely misclassifies.
+  >30 GB 26.7%, 15–30 GB 14.5%, 8–15 GB 1.8%, 4–8 GB 3.4%, **≤4 GB 53.6%**.
+  So episodes dominate the small end, concerts/movies the large end.
+- **Only 1.1% of >15 GB files look like episodes** (2,667 / 243,852); the
+  episode-marker override reclassifies exactly these, so a size-only rule would
+  mismerge almost none once the marker is honored.
 
 ### Why `size` stays in the content key
 
@@ -46,14 +43,21 @@ from dedup entirely (indexed one-doc-per-row) so junk never merges.
 ### Two-regime dedup key
 
 ```
-if size > movieSizeThreshold:  key = (sha1, size)             // movie: merge across names
-else:                          key = (name, sha1, size)        // episode: keep names separate
+isEpisode = episodeMarker.MatchString(name) || size <= movieSizeThreshold
+if !isEpisode:  key = (sha1, size)             // movie:  merge across names
+else:           key = (name, sha1, size)        // episode: keep names separate
 ```
 
-`movieSizeThreshold = 15 GiB` (a named constant, tunable). Movies merge all
-copies regardless of name into one doc; episodes keep each distinct name as its
-own doc. Directories, unhashed files (`sha1 == ""`), and the empty-string-hash
-sentinel are passthrough — one doc each, never merged.
+- `movieSizeThreshold = 10 GiB` (named constant, tunable).
+- `episodeMarker` is a package-level regexp matching the common episode-naming
+  patterns; a match means episode regardless of size:
+  `(?i)(S\d{1,2}E\d{1,3})|(EP\d{1,3})|(第\d{1,3}[集话話])|(\bE\d{2,3}\b)`.
+  The bare-`E` arm uses a word boundary and 2–3 digits to avoid matching years
+  like `E2015`. Tunable as more naming variants surface.
+- Movies merge all copies regardless of name into one doc; episodes keep each
+  distinct name as its own doc. Directories, unhashed files (`sha1 == ""`),
+  and the empty-string-hash sentinel are passthrough — one doc each, never
+  merged.
 
 ### Movie recall — multi-name doc
 
@@ -61,7 +65,7 @@ A merged movie doc indexes **all distinct names** of its content, so a search by
 any of them still hits. Episode docs index exactly their one name. Therefore the
 bleve `name` field becomes multi-valued (`searchDoc.Name []string`); the field
 NAME stays `name`, so the consumer's field-agnostic `MatchQuery` and five's
-`NewNameQuery(SetField "name"))` keep working unchanged.
+`NewNameQuery(SetField("name"))` keep working unchanged.
 
 ### Representative
 
@@ -118,17 +122,19 @@ one result findable by any of its names.
    fallback) or skip until needed? Lean: skip v1.
 3. **Share-scoped search is already dead** — `buildSearchQuery` filters on a
    bleve `share_code` field `five` never indexes. Out of scope; flagged.
-4. **Threshold tuning** — 15 GiB sits at the top of the bimodal valley
-   (conservative; treats 4–15 GB as episodes). Anywhere 4–15 GiB works
-   similarly; keep 15 GiB unless mid-size-movie merge coverage matters.
+4. **`episodeMarker` coverage** — initial set covers `S02E18` / `EP09` / `第18集`
+   / bare `E09`. Extend if real episodes slip through (treat as movie) — these
+   stay separate anyway if small, only large no-marker files risk a wrong merge.
 
 ## Testing (`internal/searchindex/dedupe_test.go` + `indexer_test.go`)
 
 `planDocs` unit tests (no bleve):
-- Movie (size>threshold), two different names same `(sha1,size)` ⇒ **one** doc,
-  `names` = both (sorted), doc id = MIN-`(share,file)`.
-- Episode (size≤threshold), two different names same `(sha1,size)` ⇒ **two**
-  docs, one name each.
+- Movie (size>threshold, no marker), two different names same `(sha1,size)` ⇒
+  **one** doc, `names` = both (sorted), doc id = MIN-`(share,file)`.
+- Episode by size (size≤threshold), two different names same `(sha1,size)` ⇒
+  **two** docs, one name each.
+- Episode by marker (size>threshold but name has `S02E18`), two different names
+  ⇒ **two** docs (marker overrides size).
 - Episode, same name across shares ⇒ one doc.
 - Dir / empty-sha1 / sentinel rows ⇒ passthrough, one doc each.
 - Deterministic output across input reorderings.
