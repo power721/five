@@ -252,6 +252,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{name: "share_title", ddl: "TEXT NOT NULL DEFAULT ''"},
 		{name: "file_size", ddl: "INTEGER NOT NULL DEFAULT 0"},
 		{name: "group_id", ddl: "INTEGER"},
+		{name: "duplicate_of", ddl: "TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return fmt.Errorf("migrate share columns: %w", err)
 	}
@@ -731,11 +732,11 @@ func (s *Store) UpdateShareMeta(ctx context.Context, shareCode, receiveCode, tit
 
 func (s *Store) GetShare(ctx context.Context, shareCode string) (model.Share, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT share_code, receive_code, share_title, file_size, status,
-		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version
+		COALESCE(last_crawled_at, 0), COALESCE(last_error, ''), failure_count, retry_after_unix, version, duplicate_of
 		FROM share WHERE share_code = ? ORDER BY id DESC LIMIT 1`, shareCode)
 	var share model.Share
 	err := row.Scan(&share.ShareCode, &share.ReceiveCode, &share.ShareTitle, &share.FileSize, &share.Status,
-		&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version)
+		&share.LastCrawledAt, &share.LastError, &share.FailureCount, &share.RetryAfterUnix, &share.Version, &share.DuplicateOf)
 	if err == sql.ErrNoRows {
 		return model.Share{}, false, nil
 	}

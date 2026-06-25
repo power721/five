@@ -947,3 +947,21 @@ func mustScan(t *testing.T, s *Store, query string, dest ...any) {
 		t.Fatalf("scan %q: %v", query, err)
 	}
 }
+
+func TestMigrateAddsDuplicateOfColumn(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	var typ string
+	err = s.db.QueryRowContext(ctx, "SELECT type FROM pragma_table_info('share') WHERE name='duplicate_of'").Scan(&typ)
+	if err != nil {
+		t.Fatalf("duplicate_of column missing: %v", err)
+	}
+	if typ != "TEXT" {
+		t.Fatalf("duplicate_of type = %q, want TEXT", typ)
+	}
+}

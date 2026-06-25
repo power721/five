@@ -25,6 +25,7 @@ type Share struct {
 	Version        int64
 	FailureCount   int
 	RetryAfterUnix int64
+	DuplicateOf   string
 }
 
 // ShareGroup is one virtual directory from the grouping overlay
