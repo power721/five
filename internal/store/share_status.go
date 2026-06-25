@@ -30,10 +30,24 @@ func (s *Store) MarkShareShelved(ctx context.Context, shareCode, errText string)
 // error, and any far-future retry_after. Returns false if no share matched
 // shareCode. Use it to retry a share that was shelved for a persistent error
 // once the underlying 115 condition may have cleared.
+// MarkShareDuplicate records that shareCode is a duplicate of canonical (same
+// file_size, above the dedup threshold) and parks it: DUPLICATE status is
+// excluded from scheduling and export. Clears failure bookkeeping.
+func (s *Store) MarkShareDuplicate(ctx context.Context, shareCode, canonical string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE share
+		SET status='DUPLICATE',
+			duplicate_of=?,
+			retry_after_unix=0,
+			failure_count=0
+		WHERE share_code = ?`, canonical, shareCode)
+	return err
+}
+
 func (s *Store) ReactivateShare(ctx context.Context, shareCode string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE share
 		SET status='ACTIVE',
 			last_error='',
+			duplicate_of='',
 			failure_count=0,
 			retry_after_unix=0
 		WHERE share_code = ?`, shareCode)
