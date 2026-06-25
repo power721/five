@@ -42,7 +42,8 @@ func main() {
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
 		backfillDelay     = flag.Duration("backfill-delay", 500*time.Millisecond, "delay between share/snap requests in backfill-share-meta mode")
 		outPath           = flag.String("out", "", "output path for export-db mode, e.g. dist/index.db")
-		apply             = flag.Bool("apply", false, "apply changes for dry-run modes (currently dedupe-share-titles)")
+		apply             = flag.Bool("apply", false, "apply changes for dry-run modes (dedupe-share-titles, dedupe-shares-by-size, cleanup-orphans)")
+		dedupeMinSize     = flag.Int64("dedupe-min-size", 1<<30, "minimum file_size in bytes for share dedup by size (default 1GiB)")
 	)
 	flag.Parse()
 
@@ -362,6 +363,19 @@ func main() {
 	case "dedupe-share-titles":
 		if err := runDedupeShareTitles(ctx, s, *apply, os.Stdout); err != nil {
 			log.Fatalf("dedupe share titles: %v", err)
+		}
+	case "dedupe-shares-by-size":
+		actions, err := s.DedupeSharesBySize(ctx, *dedupeMinSize, *apply)
+		if err != nil {
+			log.Fatalf("dedupe shares by size: %v", err)
+		}
+		for _, a := range actions {
+			fmt.Fprintf(os.Stdout, "duplicate share=%s canonical=%s files=%d\n", a.Loser, a.Canonical, a.FileCount)
+		}
+		if !*apply {
+			fmt.Fprintf(os.Stdout, "%d duplicate share(s) (dry-run; pass -apply to mark DUPLICATE and delete files)\n", len(actions))
+		} else {
+			fmt.Fprintf(os.Stdout, "marked %d duplicate share(s)\n", len(actions))
 		}
 	default:
 		log.Fatalf("unsupported mode %q", *mode)

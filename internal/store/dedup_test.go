@@ -80,3 +80,57 @@ func TestFindDuplicateShare(t *testing.T) {
 		t.Fatalf("zero size should not match: ok=%v err=%v", ok, err)
 	}
 }
+
+func TestDedupeSharesBySize(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+	mk := func(code string, size int64, crawled int64) {
+		t.Helper()
+		if err := s.UpsertShare(ctx, model.Share{ShareCode: code, ReceiveCode: "p", Status: "ACTIVE"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE share SET last_crawled_at=?, file_size=? WHERE share_code=?`, crawled, size, code); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("keep", 2<<30, 100) // oldest -> canonical
+	mk("lose", 2<<30, 200) // same size, later -> loser
+	mk("solo", 3<<30, 150) // unique -> untouched
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO file(file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, crawled_at) VALUES('f1','lose','0','a.mkv','mkv',1,0,1,'',1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// dry-run: reports the action, changes nothing.
+	actions, err := s.DedupeSharesBySize(ctx, 1<<30, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actions) != 1 || actions[0].Loser != "lose" || actions[0].Canonical != "keep" || actions[0].FileCount != 1 {
+		t.Fatalf("dry-run actions = %#v", actions)
+	}
+	loser, _, _ := s.GetShare(ctx, "lose")
+	if loser.Status != "ACTIVE" {
+		t.Fatalf("dry-run must not mutate; status=%s", loser.Status)
+	}
+
+	// apply: marks loser DUPLICATE + deletes its files.
+	if _, err := s.DedupeSharesBySize(ctx, 1<<30, true); err != nil {
+		t.Fatal(err)
+	}
+	loser, _, _ = s.GetShare(ctx, "lose")
+	if loser.Status != "DUPLICATE" || loser.DuplicateOf != "keep" {
+		t.Fatalf("after apply loser = %+v, want DUPLICATE/keep", loser)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM file WHERE share_code='lose'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("loser files = %d, want 0", n)
+	}
+	keep, _, _ := s.GetShare(ctx, "keep")
+	if keep.Status != "ACTIVE" {
+		t.Fatalf("canonical mutated: %+v", keep)
+	}
+}
