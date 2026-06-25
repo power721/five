@@ -1,6 +1,7 @@
 package searchindex
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -164,4 +165,54 @@ func TestIsContainer(t *testing.T) {
 			t.Errorf("%s: isContainer=%v, want %v", c.label, got, c.want)
 		}
 	}
+}
+
+func TestFolderNames(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	t.Run("folder_name_plus_distinct_child_stems_sorted", func(t *testing.T) {
+		d := model.File{Name: "第一季", ShareCode: "sw1", FileID: "d1", IsDir: true}
+		kids := []model.File{
+			{FileID: "e3", ShareCode: "sw1", Name: "Show.S01E03.mkv", Ext: "mkv", Size: 2 * gb},
+			{FileID: "e1", ShareCode: "sw1", Name: "Show.S01E01.mkv", Ext: "mkv", Size: 2 * gb},
+			{FileID: "e1b", ShareCode: "sw1", Name: "Show.S01E01.avi", Ext: "avi", Size: 2 * gb}, // dup stem
+		}
+		got := folderNames(d, kids)
+		want := []string{"Show.S01E01", "Show.S01E03", "第一季"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("folderNames=%v, want %v", got, want)
+		}
+	})
+	t.Run("caps_at_maxFolderNames_keeps_folder_name", func(t *testing.T) {
+		d := model.File{Name: "zzz_root", ShareCode: "sw1", FileID: "d1", IsDir: true}
+		kids := make([]model.File, 300)
+		for i := range kids {
+			kids[i] = model.File{FileID: "e", ShareCode: "sw1", Name: "S01E01.mkv", Ext: "mkv"} // all same stem
+		}
+		// all identical -> 1 distinct child stem + folder name = 2 names
+		got := folderNames(d, kids)
+		if len(got) != 2 {
+			t.Fatalf("deduped names = %d, want 2 (folder name + 1 distinct stem)", len(got))
+		}
+	})
+	t.Run("many_distinct_stems_capped_folder_name_always_present", func(t *testing.T) {
+		d := model.File{Name: "zfolder", ShareCode: "sw1", FileID: "d1", IsDir: true}
+		kids := make([]model.File, 300)
+		for i := range kids {
+			kids[i] = model.File{ShareCode: "sw1", Name: "Show.S01E01.mkv", Ext: "mkv"}
+			kids[i].Name = "Show.S01E" + string(rune('A'+i%26)) + fmt.Sprintf("%02d", i) + ".mkv"
+		}
+		got := folderNames(d, kids)
+		if len(got) > maxFolderNames {
+			t.Fatalf("names = %d, want ≤ %d", len(got), maxFolderNames)
+		}
+		found := false
+		for _, n := range got {
+			if n == "zfolder" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("folder name %q not retained after cap", d.Name)
+		}
+	})
 }

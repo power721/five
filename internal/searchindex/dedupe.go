@@ -23,6 +23,11 @@ const emptyStringHash = "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709"
 // rarely matters; 10 GiB is a conservative split.
 const movieSizeThreshold int64 = 10 * 1024 * 1024 * 1024
 
+// maxFolderNames caps how many distinct names a rolled-up folder doc carries
+// (the folder's own name plus child stems). Bounds giant folders — the corpus
+// has episode containers up to ~18k files. The folder's own name is always kept.
+const maxFolderNames = 256
+
 // episodeMarker matches filename patterns that unambiguously mark a TV episode.
 // A match means the file is an episode regardless of size, so a large 4K episode
 // is not merged as a movie. Bare "E" + digits uses a word boundary and 2–3
@@ -76,6 +81,34 @@ func isContainer(kids []model.File) bool {
 		}
 	}
 	return markers >= 5 || (files >= 5 && small*5 >= files*3 && large < 2)
+}
+
+// folderNames returns the distinct names to index for a rolled-up folder: the
+// folder's own name (always kept, verbatim) plus its direct child stems, sorted
+// and capped at maxFolderNames total. Child stems equal to the folder name are
+// deduped; when capped, the smallest child stems by sort are kept alongside the
+// folder name.
+func folderNames(d model.File, kids []model.File) []string {
+	seen := map[string]struct{}{d.Name: {}}
+	var childStems []string
+	for _, k := range kids {
+		s := stem(k)
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			childStems = append(childStems, s)
+		}
+	}
+	sort.Strings(childStems)
+	names := make([]string, 0, len(childStems)+1)
+	for _, s := range childStems {
+		if len(names) >= maxFolderNames-1 {
+			break
+		}
+		names = append(names, s)
+	}
+	names = append(names, d.Name)
+	sort.Strings(names)
+	return names
 }
 
 // planDocs groups files into the bleve documents Rebuild should index.
