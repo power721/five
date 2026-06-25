@@ -2,147 +2,142 @@
 
 ## Goal
 
-Collapse byte-identical files in search results. Today the same content shared
-by multiple users (or repeated inside one share) is indexed once per copy, so a
-search returns N identical hits. After this change, Bleve returns **one hit per
-unique content**, with pagination that reflects unique contents, not copies.
+Collapse duplicate files in search results — but only when they are truly the
+same entry: **same name AND same content**. The use case is TV-series playback:
+users play a series as a folder playlist where the filename IS the episode
+identity, so differently-named copies of the same content must stay separate
+(merging them would mix naming conventions inside a playlist and confuse episode
+order/identity). Same-name same-content copies (the egregious 330× cases) still
+collapse to one.
 
 ## Context / Data (measured on the live `data/index.db`)
 
-- 1,027,809 file rows (`is_dir=0`); **0 empty `sha1`** — every file has a hash.
-- 639,424 distinct `sha1` ⇒ **~388k rows (38%) are content-duplicates**.
-- Worst group: one file copied **330×**; m2ts clips at 202/199/171×. Duplicates
-  are both cross-share and heavily intra-share (same trailer/nfo in every movie
-  folder).
+- 1,028,371 real-hash file rows (`is_dir=0`, excluding the empty-string-hash
+  sentinel); **0 empty `sha1`** — every file has a hash.
 - Browsing is a per-share `parent_id` tree walk (`idx_file_share_parent`), so
   **file rows cannot be dropped** — every copy must stay. Dedup is purely a
-  search-result concern.
+  search-result concern; folder/playlist playback is untouched regardless.
 - **Alias diversity is high**: of 161,691 multi-copy content groups, **45% have
   more than one distinct filename** (e.g. the same episode named
   `金粉世家.The.Story…S01E09…mp4` in one share and `金粉世家 - S01E09 - 第9集.mp4`
-  in another). So dedup MUST index all distinct names, or ~half of duplicate
-  groups lose recall.
+  in another). These must NOT merge.
 
-### Why the key is `(sha1, size)`, not `sha1` alone
+### Dedup-key comparison
 
-`sha1` is a content fingerprint: identical content ⇒ identical size, so for
-*correct* hashes `size` is redundant and splits nothing. Across 639,424 sha1
-groups, `(sha1, size)` splits **exactly one**:
+| key | docs | reduction vs raw | rows collapsed |
+|---|---|---|---|
+| none (raw) | 1,028,371 | — | — |
+| `(sha1, size)` | 639,423 | 37.8% | 388,948 |
+| **`(name, sha1, size)`** | **754,701** | **26.6%** | **273,670** |
 
-```
-DA39A3EE5E6B4B0D3255BFEF95601890AFD80709   sizes = {0, 2212128132}   31 rows
-```
+`(name, sha1, size)` retains ~70% of the collapse while preserving the 115,278
+alias-named copies the playlist use case needs. The egregious same-name cases
+(330× BBQDDQ trailer, 200× m2ts clips, 回到未来3 across shares) all collapse to
+one because they share a name.
 
-`DA39A3…` is the SHA-1 of the empty string. 30 rows are genuine size-0 empty
-files; 1 row is a 2.2 GB file that 115 returned a **placeholder/corrupt hash**
-for. `sha1`-alone would merge that real file with empty files (it vanishes from
-search); `size` isolates it. (Known collision attacks like SHattered produce
-same-size pairs, so `size` does not defend against deliberate collisions — only
-against 115's occasional bad hash. Cost is zero, so include it.)
+### Why `size` stays in the key
 
-## Design (entirely inside `five`; zero PowerList change)
+`sha1` is a content fingerprint, so for *correct* hashes `size` is redundant:
+once `name` is in the key, `(name, sha1)` and `(name, sha1, size)` are identical
+across all real-hash rows. `size` is kept purely as a **corrupt-hash guard** —
+115 occasionally returns a placeholder hash (the empty-string sha1
+`DA39A3…`, seen on a 2.2 GB file mixed with genuine size-0 empties). `size`
+isolates those at zero cost. The empty-string-hash sentinel group is also
+excluded from dedup entirely (indexed one-doc-per-row) so junk never merges.
+
+## Design (entirely inside `five`; zero PowerList change, zero bleve-schema change)
 
 ### Core idea
 
-Index **one representative row per content group**, keeping that row's existing
-composite doc id and the `name` field. Skip the other rows of each group. The
-file table is untouched (browse integrity); only the search index shrinks.
+Index **one representative row per `(name, sha1, size)` group**, keeping that
+row's existing composite doc id and single `name` field. Skip the other rows of
+each group. The file table is untouched (browse integrity); only the search
+index shrinks.
+
+Because every row in a group shares the same name by definition, each emitted
+doc has exactly one name — so `searchDoc` stays a single `Name string`, alias
+copies become separate docs (preserving recall naturally), and there is no
+"searched alias B, displayed name A" mismatch.
 
 This is consumer-neutral on purpose: PowerList's `search.go` resolves every hit
 by `hit.ID` → `FilesBySearchIDs` → `parseCompositeFileID` (splits on first `-`).
 Keeping the doc id as `shareCode-fileId` means that path works **unchanged**. (A
 content-keyed id like `c:<sha1>:<size>` would have no `-`, fall into the legacy
-bare-cid branch, match nothing, and silently blank all file results — rejected
-for exactly this reason.)
+bare-cid branch, match nothing, and silently blank all file results — rejected.)
 
-### Dedup key & representative
+### Representative
 
-- `key = (sha1, size)` for files with a real hash (`is_dir=0 AND sha1 <> ''`).
-  Exclude the empty-string hash sentinel group from dedup (it only merges junk);
-  those rows are indexed individually like unhashed files.
-- For each key group, the **representative** = the row with the lexicographically
-  smallest `(share_code, file_id)` pair. Deterministic and crawl-order
-  independent, so re-indexing is stable.
-- Directories (`is_dir=1`, no hash) and unhashed files: indexed one-doc-per-row
-  as today (no dedup). Dir dedup by name is unsafe and out of scope.
+Within each `(name, sha1, size)` group, the representative = the row with the
+lexicographically smallest `(share_code, file_id)` pair. Deterministic and
+crawl-order independent, so re-indexing is stable. Its name is the group's name.
 
 ### Bleve `Rebuild` change (`internal/searchindex/indexer.go`)
 
 Currently `Rebuild` emits one doc per `(share_code, file_id)`. New flow:
 
-1. First pass over `AllFiles`: bucket real-hash files by `(sha1, size)`,
-  recording (a) the representative row and (b) the set of distinct names. Track
-  every bucketed row's id in a `seen` set. Dirs and unhashed rows pass through
-  untouched.
-2. Second pass emits:
-   - **one doc per bucket** — id = `docID(rep.ShareCode, rep.FileID)`
-     (composite, unchanged format), `Name` = sorted distinct names of the group.
-   - **one doc per dir / unhashed / sentinel row** — id = composite, `Name` =
-     `[name]`.
+1. First pass over `AllFiles`: bucket real-hash, non-sentinel files by
+   `(name, sha1, size)`. For each bucket keep only the representative row (the
+   MIN `(share_code, file_id)`); drop the rest. Dirs, unhashed files, and
+   empty-string-hash sentinel rows pass through untouched.
+2. Second pass emits one doc per surviving row — id =
+   `docID(rep.ShareCode, rep.FileID)` (composite, unchanged), `Name = row.Name`.
 3. Batch/flush as today (`rebuildBatchSize`).
 
-Memory: the bucket map holds ~640k entries of small string sets — bounded; the
-existing batch flush still caps Bleve-side memory.
+Memory: the bucket map holds ~750k entries — bounded; the existing batch flush
+still caps Bleve-side memory.
 
-### Bleve doc schema
+### Bleve doc schema — UNCHANGED
 
 ```go
 type searchDoc struct {
-    Name []string `json:"name"` // all distinct names for this content; indexed for matching
+    Name string `json:"name"`
 }
 ```
 
-- Field name stays `name` (was a single string, now a slice) so `NewNameQuery`
-  (`SetField("name")`) and the consumer's field-agnostic `NewMatchQuery` both
-  keep working with no query changes. bleve indexes string slices as multiple
-  values of the field.
-- `Name []string` preserves recall across the 45% of groups with alias names.
-- The consumer never reads doc fields — it resolves `hit.ID` to a row and
-  displays that row's name. So a hit matched via an alias shows the
-  representative's name (cosmetic; same file). Accepted for v1.
+No field-name change, no multi-valuing. `NewNameQuery` (`SetField("name")`) and
+the consumer's field-agnostic `NewMatchQuery` keep working with no query changes.
 
 ### What does NOT change
 
 - PowerList `search.go` / `store.go` / linking / browsing — **zero changes**.
   No coordinated release required; old consumer + new index work immediately.
-- The `file` table schema and row count (browse integrity).
-- The bleve doc-id format and the `name` field name.
+- The `file` table schema and row count (browse / playlist integrity).
+- The bleve doc-id format and the `name` field.
 - Export/publish pipeline shape (`index.db` + `bleve/` + `version.txt`).
+- Folder-based playlist playback (uses the file table, never bleve).
 
 ### Observable behavior change
 
-`SearchRequest` `total` now counts **unique contents**, not copies (e.g. a term
-matching a 330-copy group returns `total` reflecting 1 content). This is the
-desired dedup; clients that display result counts will show smaller numbers.
+`SearchRequest` `total` now counts unique `(name, content)` entries, not raw
+copies. Desired: clients displaying result counts show smaller, de-duplicated
+numbers while every distinct filename remains reachable.
 
 ## Open questions
 
 1. **Representative survival across the rebuild/trim drift.** Bleve is rebuilt
    in `rebuild-index` at T1; `index.db` is trimmed (DEAD shares pruned) at T2 in
    `export-db`. If the representative's share goes DEAD between T1 and T2, the
-   doc's row is gone and the content disappears from search until the next
-   rebuild (today each copy had its own doc, so other copies survived).
-   Mitigation options: (a) rebuild bleve from the **trimmed** db at export so
-   the representative always exists; (b) exclude `status='DEAD'` shares when
-   picking the representative. Recommend (a) as a follow-up hardening — not a
-   blocker, since DEAD is rare and a rebuild follows.
+   doc's row is gone and that `(name, content)` entry disappears from search
+   until the next rebuild. Recommend rebuilding bleve from the **trimmed** db at
+   export as follow-up hardening — not a blocker (DEAD is rare, rebuild follows).
 2. **`idx_file_sha1` in the shipped db** — ship it (cheap; enables a future
-   "N sources" / dead-share fallback query in the consumer) or skip until
-   needed? Lean: skip for v1 (consumer doesn't use it yet).
+   "N sources" / dead-share fallback query) or skip until needed? Lean: skip v1.
 3. **Share-scoped search is already dead** — `buildSearchQuery` filters on a
    bleve `share_code` field that `five` never indexes, so `?share_code=` search
-   returns empty today. Out of scope here; flagged for a separate fix if wanted
-   (and cross-share dedup would need thought if ever revived).
+   returns empty today. Out of scope; flagged separately.
+4. **Drop `size` from the key?** It never splits anything `(name, sha1)` wouldn't
+   in real data; it's purely the corrupt-hash guard. Keep (zero cost) or drop.
 
 ## Testing (`internal/searchindex/indexer_test.go`)
 
-- Two files, same `(sha1,size)`, different shares ⇒ **one** doc, id is the
-  MIN-`(share,file)` composite, both names present in `Name`.
-- Same content, two different names ⇒ both names indexed (alias recall).
+- Two files, same name + same `(sha1,size)`, different shares ⇒ **one** doc, id
+  is the MIN-`(share,file)` composite.
+- Same content, **different names** ⇒ **two** docs (not merged) — alias entries
+  preserved for playlists.
 - Representative stable across two rebuilds with reordered input.
 - Directory rows ⇒ one doc each, composite id, not merged.
-- Empty-string-hash sentinel group ⇒ NOT merged into one; one doc per row.
-- Doc count = distinct real-hash `(sha1,size)` + dir rows + unhashed rows +
+- Empty-string-hash sentinel rows ⇒ NOT merged; one doc per row.
+- Doc count = distinct real-hash `(name, sha1, size)` + dir rows + unhashed +
   sentinel rows.
 
 ## Out of scope
