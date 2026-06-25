@@ -27,6 +27,7 @@ type Store interface {
 	SaveCheckpoint(ctx context.Context, cp model.Checkpoint) error
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 	UpdateShareMeta(ctx context.Context, shareCode, receiveCode, title string, fileSize int64) error
+	FindDuplicateShare(ctx context.Context, shareCode string, fileSize, minSize int64) (string, bool, error)
 }
 
 type Config struct {
@@ -36,6 +37,10 @@ type Config struct {
 	// reports true, CrawlShare finishes the current page, checkpoints, and
 	// returns ErrPaused instead of fetching the next page. Nil means never pause.
 	PauseChecker func() bool
+	// DedupeMinFileSize: on the first page, if the share's file_size is >= this
+	// and another share already has the same size, the share is a duplicate and
+	// is not indexed (CrawlShare returns DuplicateShareError). 0 disables dedup.
+	DedupeMinFileSize int64
 }
 
 const RootCID = "0"
@@ -44,6 +49,20 @@ const RootCID = "0"
 // paused. The in-flight page completes and is checkpointed first, so the share
 // resumes cleanly from the next page on the next crawl.
 var ErrPaused = errors.New("crawler paused")
+
+// DuplicateShareError is returned by CrawlShare on the first page when the
+// share's file_size matches an already-indexed share (>= DedupeMinFileSize).
+// Canonical is the keeper that this share duplicates.
+type DuplicateShareError struct {
+	Canonical string
+}
+
+func (e *DuplicateShareError) Error() string { return "duplicate of " + e.Canonical }
+
+// ErrDuplicateShare is the sentinel wrapped by DuplicateShareError for errors.Is.
+var ErrDuplicateShare = errors.New("duplicate share")
+
+func (e *DuplicateShareError) Unwrap() error { return ErrDuplicateShare }
 
 type Crawler struct {
 	lister Lister
@@ -64,6 +83,7 @@ func New(lister Lister, store Store, cfg Config) *Crawler {
 func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt int64) error {
 	log.Printf("event=crawl_share_started share=%s", share.ShareCode)
 	metaPersisted := false
+	dedupChecked := false
 	cp, ok, err := c.store.LoadCheckpoint(ctx, share.ShareCode)
 	if err != nil {
 		return err
@@ -142,6 +162,19 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 					return err
 				}
 				log.Printf("event=crawl_page_retry share=%s cid=%s offset=%d attempt=%d error=%q", share.ShareCode, task.CID, offset, attempt+1, err.Error())
+			}
+			// Dedup check runs once per share, on the first page, before any file
+			// is indexed. A duplicate returns immediately and writes nothing.
+			if !dedupChecked {
+				dedupChecked = true
+				if c.cfg.DedupeMinFileSize > 0 && page.FileSize >= c.cfg.DedupeMinFileSize {
+					if canonical, isDup, err := c.store.FindDuplicateShare(ctx, share.ShareCode, page.FileSize, c.cfg.DedupeMinFileSize); err != nil {
+						return err
+					} else if isDup {
+						log.Printf("event=crawl_share_duplicate share=%s canonical=%s file_size=%d", share.ShareCode, canonical, page.FileSize)
+						return &DuplicateShareError{Canonical: canonical}
+					}
+				}
 			}
 			// Share metadata (title/size) is constant per share and present on
 			// every snap page; persist it once on the first page we see. Only fill

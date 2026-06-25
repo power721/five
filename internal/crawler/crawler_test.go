@@ -42,12 +42,21 @@ func (f *fakeLister) ListPage(_ context.Context, share model.Share, cid string, 
 }
 
 type memoryStore struct {
-	files          []model.File
-	checkpoint     model.Checkpoint
-	checkpointSeen bool
-	history        []model.Checkpoint
-	upsertBatches  [][]string
-	metaUpdates    []shareMetaUpdate
+	files            []model.File
+	checkpoint       model.Checkpoint
+	checkpointSeen   bool
+	history          []model.Checkpoint
+	upsertBatches    [][]string
+	metaUpdates      []shareMetaUpdate
+	duplicateOf      string // if set, FindDuplicateShare returns this (with ok=true)
+	duplicateMinSize int64
+}
+
+func (m *memoryStore) FindDuplicateShare(_ context.Context, _ string, fileSize, minSize int64) (string, bool, error) {
+	if m.duplicateOf != "" && fileSize >= m.duplicateMinSize && fileSize >= minSize {
+		return m.duplicateOf, true, nil
+	}
+	return "", false, nil
 }
 
 type shareMetaUpdate struct {
@@ -599,5 +608,51 @@ func TestCrawlerReturnsErrPausedAfterCurrentPage(t *testing.T) {
 	// The current page finished (f1 upserted); the next page never started (no f2).
 	if len(store.files) != 1 || store.files[0].FileID != "f1" {
 		t.Fatalf("stored files = %#v, want [f1] (current page completes, next does not start)", store.files)
+	}
+}
+
+func TestCrawlerAbortsOnDuplicateShareBeforeIndexing(t *testing.T) {
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {{
+				ShareTitle: "Pack",
+				FileSize:   2 << 30,
+				Nodes: []model.File{
+					{FileID: "f1", ShareCode: "dup", ParentID: "0", Name: "A.mkv", Ext: "mkv"},
+				},
+				HasMore: false,
+			}},
+		},
+	}
+	store := &memoryStore{duplicateOf: "canon", duplicateMinSize: 1 << 30}
+	c := New(lister, store, Config{PageSize: 100, DedupeMinFileSize: 1 << 30})
+
+	err := c.CrawlShare(context.Background(), model.Share{ShareCode: "dup", ReceiveCode: "p"}, 100)
+	var dup *DuplicateShareError
+	if !errors.As(err, &dup) || dup.Canonical != "canon" {
+		t.Fatalf("err = %v, want DuplicateShareError{canon}", err)
+	}
+	if len(store.files) != 0 {
+		t.Fatalf("duplicate must not be indexed; files = %#v", store.files)
+	}
+	if len(store.metaUpdates) != 0 {
+		t.Fatalf("duplicate must not persist meta; metaUpdates = %#v", store.metaUpdates)
+	}
+}
+
+func TestCrawlerCrawlsWhenNoDuplicateOrBelowThreshold(t *testing.T) {
+	// Below threshold: no dedup, crawl normally.
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {{Nodes: []model.File{{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "A.mkv", Ext: "mkv"}}, HasMore: false}},
+		},
+	}
+	store := &memoryStore{duplicateOf: "canon", duplicateMinSize: 1 << 30}
+	c := New(lister, store, Config{PageSize: 100, DedupeMinFileSize: 1 << 30})
+	if err := c.CrawlShare(context.Background(), model.Share{ShareCode: "sw1"}, 100); err != nil {
+		t.Fatalf("below-threshold crawl: %v", err)
+	}
+	if len(store.files) != 1 {
+		t.Fatalf("small share should be indexed; files = %#v", store.files)
 	}
 }
