@@ -30,7 +30,7 @@ type Builder struct {
 var rebuildBatchSize = 2000
 
 type searchDoc struct {
-	Name string `json:"name"`
+	Name []string `json:"name"` // distinct names to match on (1 for episodes/dirs; many for merged movies)
 }
 
 func (d searchDoc) Type() string {
@@ -94,11 +94,15 @@ func (b *Builder) Rebuild(ctx context.Context, provider FileProvider, version in
 		pending = 0
 		return nil
 	}
-	for _, f := range files {
+	// Dedup before indexing: planDocs collapses same-content copies into one
+	// doc per movie (carrying every name) and one doc per episode filename.
+	// Doc id stays the representative's "shareCode-fileId" so the consumer
+	// (FilesBySearchIDs) resolves hits unchanged.
+	for _, d := range planDocs(files) {
 		doc := searchDoc{
-			Name: f.Name,
+			Name: d.names,
 		}
-		if err := batch.Index(docID(f.ShareCode, f.FileID), doc); err != nil {
+		if err := batch.Index(d.docID, doc); err != nil {
 			index.Close()
 			return model.IndexManifest{}, err
 		}

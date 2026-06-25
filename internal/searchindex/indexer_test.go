@@ -146,3 +146,75 @@ func TestRebuildKeysDocsByShareCodeAndFileID(t *testing.T) {
 		}
 	}
 }
+
+// TestRebuildMergesMovieAcrossNamesAndMatchesEither guards movie content-dedup:
+// two large, no-marker files with the same (sha1,size) but different names merge
+// into ONE doc that carries both names, so a search for either still hits.
+func TestRebuildMergesMovieAcrossNamesAndMatchesEither(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := staticProvider{
+		files: []model.File{
+			{FileID: "9", ShareCode: "swz", Name: "Avatar.2009.2160p.mkv", SHA1: "AAA", Size: 40 * gb},
+			{FileID: "1", ShareCode: "swa", Name: "阿凡达.2009.2160p.mkv", SHA1: "AAA", Size: 40 * gb},
+		},
+	}
+	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	index, err := bleve.Open(manifest.IndexPath)
+	if err != nil {
+		t.Fatalf("open bleve: %v", err)
+	}
+	defer index.Close()
+
+	count, err := index.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("doc count = %d, want 1 (movie merged across names)", count)
+	}
+	for _, term := range []string{"Avatar", "阿凡达"} {
+		req := bleve.NewSearchRequest(bleve.NewMatchQuery(term))
+		res, err := index.Search(req)
+		if err != nil {
+			t.Fatalf("search %q: %v", term, err)
+		}
+		if res.Total != 1 {
+			t.Errorf("search %q total = %d, want 1 (merged movie must match either name)", term, res.Total)
+		}
+	}
+}
+
+// TestRebuildKeepsDifferentlyNamedEpisodesSeparate guards episode dedup: two
+// small files with the same (sha1,size) but different names stay as two docs.
+func TestRebuildKeepsDifferentlyNamedEpisodesSeparate(t *testing.T) {
+	gb := int64(1024 * 1024 * 1024)
+	dir := t.TempDir()
+	builder := New(filepath.Join(dir, "bleve"))
+	provider := staticProvider{
+		files: []model.File{
+			{FileID: "1", ShareCode: "swa", Name: "Show - S01E09 - 第9集.mkv", SHA1: "AAA", Size: 2 * gb},
+			{FileID: "2", ShareCode: "swb", Name: "Show.S01E09.mkv", SHA1: "AAA", Size: 2 * gb},
+		},
+	}
+	manifest, err := builder.Rebuild(context.Background(), provider, 1, 1)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	index, err := bleve.Open(manifest.IndexPath)
+	if err != nil {
+		t.Fatalf("open bleve: %v", err)
+	}
+	defer index.Close()
+	count, err := index.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("doc count = %d, want 2 (episodes with different names stay separate)", count)
+	}
+}
