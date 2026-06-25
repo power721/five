@@ -9,18 +9,20 @@ import (
 	"time"
 
 	"five/internal/api115"
+	"five/internal/crawler"
 	"five/internal/model"
 )
 
 type registryStore struct {
-	shares        []model.Share
-	markedCrawled []string
-	markedFailed  []string
-	markedDead    []string
-	markedShelved []string
-	dedupeCalls   int
-	dedupeDryRun  bool
-	dedupeReturns []model.ShareRename
+	shares         []model.Share
+	markedCrawled  []string
+	markedFailed   []string
+	markedDead     []string
+	markedShelved  []string
+	markedDuplicate []string
+	dedupeCalls    int
+	dedupeDryRun   bool
+	dedupeReturns  []model.ShareRename
 }
 
 func (r *registryStore) ListSharesForCrawl(_ context.Context, _ int64) ([]model.Share, error) {
@@ -46,6 +48,13 @@ func (r *registryStore) MarkShareShelved(_ context.Context, shareCode, _ string)
 	r.markedShelved = append(r.markedShelved, shareCode)
 	return nil
 }
+
+func (r *registryStore) MarkShareDuplicate(_ context.Context, shareCode, canonical string) error {
+	r.markedDuplicate = append(r.markedDuplicate, shareCode+":"+canonical)
+	return nil
+}
+
+func (r *registryStore) PurgeIfOrphan(context.Context, string) (bool, error) { return false, nil }
 
 func (r *registryStore) DedupeShareTitles(_ context.Context, dryRun bool) ([]model.ShareRename, error) {
 	r.dedupeCalls++
@@ -190,6 +199,8 @@ func (emptyRegistry) MarkShareCrawled(context.Context, string, int64) error    {
 func (emptyRegistry) RecordShareFailure(context.Context, string, string) error { return nil }
 func (emptyRegistry) MarkShareDead(context.Context, string, string) error      { return nil }
 func (emptyRegistry) MarkShareShelved(context.Context, string, string) error   { return nil }
+func (emptyRegistry) MarkShareDuplicate(context.Context, string, string) error { return nil }
+func (emptyRegistry) PurgeIfOrphan(context.Context, string) (bool, error)       { return false, nil }
 func (emptyRegistry) DedupeShareTitles(context.Context, bool) ([]model.ShareRename, error) {
 	return nil, nil
 }
@@ -490,5 +501,29 @@ func TestSchedulerRunLoopWaitsForResume(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("RunLoop did not return after cancel")
+	}
+}
+
+type duplicateRunner struct{ canonical string }
+
+func (r *duplicateRunner) CrawlShare(context.Context, model.Share, int64) error {
+	return &crawler.DuplicateShareError{Canonical: r.canonical}
+}
+
+func TestSchedulerMarksDuplicateWithoutFailure(t *testing.T) {
+	store := &registryStore{
+		shares: []model.Share{{ShareCode: "dup", ReceiveCode: "a"}},
+	}
+	s := New(store, &duplicateRunner{canonical: "canon"}, nil)
+
+	_, err := s.RunOnce(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.markedDuplicate) != 1 || store.markedDuplicate[0] != "dup:canon" {
+		t.Fatalf("markedDuplicate = %#v, want [dup:canon]", store.markedDuplicate)
+	}
+	if len(store.markedFailed) != 0 {
+		t.Fatalf("duplicate must not be recorded as failure; markedFailed=%#v", store.markedFailed)
 	}
 }

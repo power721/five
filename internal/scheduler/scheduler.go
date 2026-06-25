@@ -10,6 +10,7 @@ import (
 
 import (
 	"five/internal/api115"
+	"five/internal/crawler"
 	"five/internal/logutil"
 	"five/internal/model"
 )
@@ -20,6 +21,8 @@ type Registry interface {
 	RecordShareFailure(ctx context.Context, shareCode, errText string) error
 	MarkShareDead(ctx context.Context, shareCode, errText string) error
 	MarkShareShelved(ctx context.Context, shareCode, errText string) error
+	MarkShareDuplicate(ctx context.Context, shareCode, canonical string) error
+	PurgeIfOrphan(ctx context.Context, shareCode string) (bool, error)
 	DedupeShareTitles(ctx context.Context, dryRun bool) ([]model.ShareRename, error)
 }
 
@@ -74,6 +77,19 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 		}
 		s.logger.Printf("event=share_crawl_started share=%s", share.ShareCode)
 		err := s.runner.CrawlShare(ctx, share, now)
+		var dup *crawler.DuplicateShareError
+		if errors.As(err, &dup) {
+			if e := s.registry.MarkShareDuplicate(ctx, share.ShareCode, dup.Canonical); e != nil {
+				return false, e
+			}
+			s.logger.Printf("event=share_crawl_finished share=%s result=duplicate canonical=%s", share.ShareCode, dup.Canonical)
+			continue
+		}
+		// Purge any rows a deleted share's in-flight crawl resurrected. A share
+		// that still exists (the common case) is a no-op here.
+		if _, e := s.registry.PurgeIfOrphan(ctx, share.ShareCode); e != nil {
+			return false, e
+		}
 		switch {
 		case err == nil:
 			proxyFailureOnly = false
