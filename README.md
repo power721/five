@@ -50,8 +50,17 @@ FIVE_PROXY_PASSWORD=your-proxy-password
 | `backfill-share-meta` | Refresh share title/size from 115 for shares in `-shares-file`. |
 | `validate-share-counts` | Compare indexed file counts against live 115 counts. |
 | `dedupe-share-titles` | Collapse duplicate share titles (dry-run unless `-apply`). |
+| `dedupe-shares-by-size` | Mark same-`file_size` (≥ `-dedupe-min-size`) shares `DUPLICATE` and delete their files (dry-run unless `-apply`). |
+| `cleanup-orphans` | List/delete `file` rows whose share was removed (dry-run unless `-apply`). |
 | `rebuild-index` | Rebuild the Bleve index from SQLite. |
 | `export-db` | Package a self-contained index zip for consumers. |
+
+Duplicate shares (identical total `file_size`, by default ≥ 1GiB via
+`-dedupe-min-size`) are detected on the first crawl page and marked `DUPLICATE`
+without indexing; `DUPLICATE` shares are excluded from scheduling and `export-db`.
+`-mode dedupe-shares-by-size [-apply]` cleans already-indexed duplicates;
+`-mode cleanup-orphans [-apply]` removes files whose share row is gone (e.g. a
+share deleted mid-crawl).
 
 ```bash
 go run ./cmd/115-indexer \

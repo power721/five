@@ -218,7 +218,7 @@ func main() {
 			ProxyPool:   proxyAccess{manager: proxyMgr, provider: provider, validator: validator},
 		}
 		lister := apiLister{client: client}
-		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
+		c := crawler.New(lister, s, crawler.Config{PageSize: 100, DedupeMinFileSize: *dedupeMinSize})
 		sched := scheduler.New(s, c, log.Writer())
 		if _, err := sched.RunOnce(ctx, time.Now().Unix()); err != nil {
 			log.Fatalf("run scheduler once: %v", err)
@@ -247,7 +247,7 @@ func main() {
 		}
 		lister := apiLister{client: client}
 		gate := scheduler.NewPauseGate()
-		c := crawler.New(lister, s, crawler.Config{PageSize: 100, PauseChecker: gate.Paused})
+		c := crawler.New(lister, s, crawler.Config{PageSize: 100, PauseChecker: gate.Paused, DedupeMinFileSize: *dedupeMinSize})
 		sched := scheduler.New(s, c, log.Writer())
 		sched.SetPauseGate(gate)
 		log.Printf(
