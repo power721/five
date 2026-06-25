@@ -2,143 +2,144 @@
 
 ## Goal
 
-Collapse duplicate files in search results — but only when they are truly the
-same entry: **same name AND same content**. The use case is TV-series playback:
-users play a series as a folder playlist where the filename IS the episode
-identity, so differently-named copies of the same content must stay separate
-(merging them would mix naming conventions inside a playlist and confuse episode
-order/identity). Same-name same-content copies (the egregious 330× cases) still
-collapse to one.
+Collapse duplicate files in search results with two regimes:
+- **Movies / single-play units** (large files): dedup by content alone —
+  differently-named copies of the same movie merge into one result, carrying
+  every name so any of them still matches.
+- **TV episodes** (small files): dedup by name AND content — differently-named
+  copies stay separate, because users play series as folder playlists where the
+  filename IS the episode identity and merging names would mix conventions.
+
+The use case driving the split: TV-series folder playback. Same-name
+same-content copies (the egregious 330× cases) collapse under both regimes.
 
 ## Context / Data (measured on the live `data/index.db`)
 
 - 1,028,371 real-hash file rows (`is_dir=0`, excluding the empty-string-hash
-  sentinel); **0 empty `sha1`** — every file has a hash.
+  sentinel); **0 empty `sha1`**.
 - Browsing is a per-share `parent_id` tree walk (`idx_file_share_parent`), so
   **file rows cannot be dropped** — every copy must stay. Dedup is purely a
   search-result concern; folder/playlist playback is untouched regardless.
-- **Alias diversity is high**: of 161,691 multi-copy content groups, **45% have
-  more than one distinct filename** (e.g. the same episode named
-  `金粉世家.The.Story…S01E09…mp4` in one share and `金粉世家 - S01E09 - 第9集.mp4`
-  in another). These must NOT merge.
+- **Alias groups** (same content, >1 distinct name) split bimodally by size:
 
-### Dedup-key comparison
+  | size band | % of alias groups | content |
+  |---|---|---|
+  | >30 GB | 26.7% | concert ISOs, 4K remux movies |
+  | 15–30 GB | 14.5% | concerts, 4K movies |
+  | 8–15 GB | 1.8% | mixed (concert discs + few movies) |
+  | 4–8 GB | 3.4% | mixed |
+  | ≤4 GB | **53.6%** | TV episodes |
 
-| key | docs | reduction vs raw | rows collapsed |
-|---|---|---|---|
-| none (raw) | 1,028,371 | — | — |
-| `(sha1, size)` | 639,423 | 37.8% | 388,948 |
-| **`(name, sha1, size)`** | **754,701** | **26.6%** | **273,670** |
+- **Only 1.1% of >15 GB files look like episodes** (2,667 / 243,852); 98.9% are
+  concerts/movies. So treating `size > 15 GB` as "movie" rarely misclassifies.
 
-`(name, sha1, size)` retains ~70% of the collapse while preserving the 115,278
-alias-named copies the playlist use case needs. The egregious same-name cases
-(330× BBQDDQ trailer, 200× m2ts clips, 回到未来3 across shares) all collapse to
-one because they share a name.
+### Why `size` stays in the content key
 
-### Why `size` stays in the key
+`sha1` is a content fingerprint, so for *correct* hashes `size` is redundant.
+`size` is kept purely as a **corrupt-hash guard** — 115 occasionally returns a
+placeholder hash (the empty-string sha1 `DA39A3…`, seen on a 2.2 GB file mixed
+with genuine size-0 empties). The empty-string-hash sentinel group is excluded
+from dedup entirely (indexed one-doc-per-row) so junk never merges.
 
-`sha1` is a content fingerprint, so for *correct* hashes `size` is redundant:
-once `name` is in the key, `(name, sha1)` and `(name, sha1, size)` are identical
-across all real-hash rows. `size` is kept purely as a **corrupt-hash guard** —
-115 occasionally returns a placeholder hash (the empty-string sha1
-`DA39A3…`, seen on a 2.2 GB file mixed with genuine size-0 empties). `size`
-isolates those at zero cost. The empty-string-hash sentinel group is also
-excluded from dedup entirely (indexed one-doc-per-row) so junk never merges.
+## Design (entirely inside `five`; zero PowerList change)
 
-## Design (entirely inside `five`; zero PowerList change, zero bleve-schema change)
+### Two-regime dedup key
 
-### Core idea
+```
+if size > movieSizeThreshold:  key = (sha1, size)             // movie: merge across names
+else:                          key = (name, sha1, size)        // episode: keep names separate
+```
 
-Index **one representative row per `(name, sha1, size)` group**, keeping that
-row's existing composite doc id and single `name` field. Skip the other rows of
-each group. The file table is untouched (browse integrity); only the search
-index shrinks.
+`movieSizeThreshold = 15 GiB` (a named constant, tunable). Movies merge all
+copies regardless of name into one doc; episodes keep each distinct name as its
+own doc. Directories, unhashed files (`sha1 == ""`), and the empty-string-hash
+sentinel are passthrough — one doc each, never merged.
 
-Because every row in a group shares the same name by definition, each emitted
-doc has exactly one name — so `searchDoc` stays a single `Name string`, alias
-copies become separate docs (preserving recall naturally), and there is no
-"searched alias B, displayed name A" mismatch.
+### Movie recall — multi-name doc
 
-This is consumer-neutral on purpose: PowerList's `search.go` resolves every hit
-by `hit.ID` → `FilesBySearchIDs` → `parseCompositeFileID` (splits on first `-`).
-Keeping the doc id as `shareCode-fileId` means that path works **unchanged**. (A
-content-keyed id like `c:<sha1>:<size>` would have no `-`, fall into the legacy
-bare-cid branch, match nothing, and silently blank all file results — rejected.)
+A merged movie doc indexes **all distinct names** of its content, so a search by
+any of them still hits. Episode docs index exactly their one name. Therefore the
+bleve `name` field becomes multi-valued (`searchDoc.Name []string`); the field
+NAME stays `name`, so the consumer's field-agnostic `MatchQuery` and five's
+`NewNameQuery(SetField "name"))` keep working unchanged.
 
 ### Representative
 
-Within each `(name, sha1, size)` group, the representative = the row with the
-lexicographically smallest `(share_code, file_id)` pair. Deterministic and
-crawl-order independent, so re-indexing is stable. Its name is the group's name.
+Within each group, the representative = the row with the lexicographically
+smallest `(share_code, file_id)` pair. Deterministic and crawl-order
+independent. Its composite id is the bleve doc id; for movies its name is just
+one of the indexed names (display comes from the resolved row anyway).
 
 ### Bleve `Rebuild` change (`internal/searchindex/indexer.go`)
 
-Currently `Rebuild` emits one doc per `(share_code, file_id)`. New flow:
+A new pure helper `planDocs(files) []indexedDoc` (in
+`internal/searchindex/dedupe.go`) does the grouping and returns exactly the docs
+to emit — each a composite doc id + the distinct names to index. `Rebuild` then
+iterates `planDocs(files)` instead of every row. `manifest.FileCount` stays
+`len(files)` (raw crawled rows; the consumer's result total comes from bleve's
+`res.Total`, which now reflects deduped docs).
 
-1. First pass over `AllFiles`: bucket real-hash, non-sentinel files by
-   `(name, sha1, size)`. For each bucket keep only the representative row (the
-   MIN `(share_code, file_id)`); drop the rest. Dirs, unhashed files, and
-   empty-string-hash sentinel rows pass through untouched.
-2. Second pass emits one doc per surviving row — id =
-   `docID(rep.ShareCode, rep.FileID)` (composite, unchanged), `Name = row.Name`.
-3. Batch/flush as today (`rebuildBatchSize`).
+### Why the doc id stays composite
 
-Memory: the bucket map holds ~750k entries — bounded; the existing batch flush
-still caps Bleve-side memory.
+PowerList's `search.go` resolves every hit by `hit.ID` → `FilesBySearchIDs` →
+`parseCompositeFileID` (splits on first `-`). Keeping the doc id as
+`shareCode-fileId` means that path works **unchanged**. (A content-keyed id
+would have no `-`, fall into the legacy bare-cid branch, match nothing, and
+silently blank all file results — rejected.)
 
-### Bleve doc schema — UNCHANGED
+### Bleve doc schema
 
 ```go
 type searchDoc struct {
-    Name string `json:"name"`
+    Name []string `json:"name"` // distinct names to match on (1 for episodes/dirs; many for merged movies)
 }
 ```
-
-No field-name change, no multi-valuing. `NewNameQuery` (`SetField("name")`) and
-the consumer's field-agnostic `NewMatchQuery` keep working with no query changes.
 
 ### What does NOT change
 
 - PowerList `search.go` / `store.go` / linking / browsing — **zero changes**.
-  No coordinated release required; old consumer + new index work immediately.
+  No coordinated release required.
 - The `file` table schema and row count (browse / playlist integrity).
-- The bleve doc-id format and the `name` field.
-- Export/publish pipeline shape (`index.db` + `bleve/` + `version.txt`).
-- Folder-based playlist playback (uses the file table, never bleve).
+- The bleve doc-id format and the `name` field name.
+- Export/publish pipeline shape.
 
 ### Observable behavior change
 
-`SearchRequest` `total` now counts unique `(name, content)` entries, not raw
-copies. Desired: clients displaying result counts show smaller, de-duplicated
-numbers while every distinct filename remains reachable.
+`SearchRequest` `total` counts deduped entries, not raw copies; a merged movie is
+one result findable by any of its names.
 
 ## Open questions
 
-1. **Representative survival across the rebuild/trim drift.** Bleve is rebuilt
-   in `rebuild-index` at T1; `index.db` is trimmed (DEAD shares pruned) at T2 in
-   `export-db`. If the representative's share goes DEAD between T1 and T2, the
-   doc's row is gone and that `(name, content)` entry disappears from search
-   until the next rebuild. Recommend rebuilding bleve from the **trimmed** db at
-   export as follow-up hardening — not a blocker (DEAD is rare, rebuild follows).
-2. **`idx_file_sha1` in the shipped db** — ship it (cheap; enables a future
-   "N sources" / dead-share fallback query) or skip until needed? Lean: skip v1.
+1. **Representative survival across rebuild/trim drift** — bleve is rebuilt at
+   T1, `index.db` trimmed (DEAD shares pruned) at T2. If the rep's share dies
+   in between, that entry vanishes from search until next rebuild. Recommend
+   rebuilding bleve from the trimmed db at export as follow-up hardening.
+2. **`idx_file_sha1` in the shipped db** — ship (enables future "N sources" /
+   fallback) or skip until needed? Lean: skip v1.
 3. **Share-scoped search is already dead** — `buildSearchQuery` filters on a
-   bleve `share_code` field that `five` never indexes, so `?share_code=` search
-   returns empty today. Out of scope; flagged separately.
-4. **Drop `size` from the key?** It never splits anything `(name, sha1)` wouldn't
-   in real data; it's purely the corrupt-hash guard. Keep (zero cost) or drop.
+   bleve `share_code` field `five` never indexes. Out of scope; flagged.
+4. **Threshold tuning** — 15 GiB sits at the top of the bimodal valley
+   (conservative; treats 4–15 GB as episodes). Anywhere 4–15 GiB works
+   similarly; keep 15 GiB unless mid-size-movie merge coverage matters.
 
-## Testing (`internal/searchindex/indexer_test.go`)
+## Testing (`internal/searchindex/dedupe_test.go` + `indexer_test.go`)
 
-- Two files, same name + same `(sha1,size)`, different shares ⇒ **one** doc, id
-  is the MIN-`(share,file)` composite.
-- Same content, **different names** ⇒ **two** docs (not merged) — alias entries
-  preserved for playlists.
-- Representative stable across two rebuilds with reordered input.
-- Directory rows ⇒ one doc each, composite id, not merged.
-- Empty-string-hash sentinel rows ⇒ NOT merged; one doc per row.
-- Doc count = distinct real-hash `(name, sha1, size)` + dir rows + unhashed +
-  sentinel rows.
+`planDocs` unit tests (no bleve):
+- Movie (size>threshold), two different names same `(sha1,size)` ⇒ **one** doc,
+  `names` = both (sorted), doc id = MIN-`(share,file)`.
+- Episode (size≤threshold), two different names same `(sha1,size)` ⇒ **two**
+  docs, one name each.
+- Episode, same name across shares ⇒ one doc.
+- Dir / empty-sha1 / sentinel rows ⇒ passthrough, one doc each.
+- Deterministic output across input reorderings.
+
+Rebuild integration tests (bleve):
+- Movie with two different names ⇒ 1 doc, and a search for *either* name hits.
+- Episode with two different names ⇒ 2 docs.
+- Existing tests (`TestRebuildCreatesSearchableIndexAndManifest`,
+  `TestRebuildFlushesBoundedBatchesAcrossRemainder`,
+  `TestRebuildKeysDocsByShareCodeAndFileID`) still pass — they use empty-`sha1`
+  rows (passthrough), unaffected.
 
 ## Out of scope
 
