@@ -20,7 +20,7 @@ Out of scope:
 
 ## Run
 
-Proxy is required for all modes that access 115 directly: `crawl`, `run-scheduler-once`, and `daemon`.
+Proxy is required for all modes that access 115 directly: `crawl`, `run-scheduler-once`, `daemon`, and `validate-share-counts`. `backfill-share-meta` routes through the proxy when credentials are available and falls back to a direct request otherwise.
 
 The indexer uses a single active proxy at a time. When the active proxy fails repeatedly, it is discarded and a new proxy is fetched on demand. If several consecutive proxy replacements fail, the service stops instead of continuing to burn through invalid proxies.
 
@@ -36,6 +36,22 @@ Example `.env`:
 FIVE_PROXY_KEY=your-proxy-key
 FIVE_PROXY_PASSWORD=your-proxy-password
 ```
+
+### Modes
+
+| Mode | Description |
+|---|---|
+| `crawl` | Crawl one share (`-share-code` + `-receive-code`). |
+| `daemon` | Long-lived: scheduler loop plus admin/metrics HTTP servers. |
+| `run-scheduler-once` | Run a single scheduler crawl cycle, then exit. |
+| `import-shares` | Register shares in bulk from `-shares-file`. |
+| `import-groups` | Apply the virtual-dir group overlay from `-groups-file`. |
+| `register-share` | Register one share from `-share-url` (or `-share-code`). |
+| `backfill-share-meta` | Refresh share title/size from 115 for shares in `-shares-file`. |
+| `validate-share-counts` | Compare indexed file counts against live 115 counts. |
+| `dedupe-share-titles` | Collapse duplicate share titles (dry-run unless `-apply`). |
+| `rebuild-index` | Rebuild the Bleve index from SQLite. |
+| `export-db` | Package a self-contained index zip for consumers. |
 
 ```bash
 go run ./cmd/115-indexer \
@@ -76,6 +92,8 @@ Useful endpoints while running:
 - `GET /shares` on `admin-addr`: all registered shares with current status and failure state
 - `GET /shares/<share_code>` on `admin-addr`: one share's detailed progress, including checkpoint queue size, visited count, and next page offset
 - `POST /shares` on `admin-addr`: add a new share task while the service is running
+- `DELETE /shares/<share_code>` on `admin-addr`: remove a share and all of its data — files, BFS checkpoint (queue/visited/offset), and the share row. Refused with `409` if the share still has indexed files unless `?force=true` is passed.
+- `POST /shares/<share_code>/reactivate` on `admin-addr`: reset a shelved/quarantined/dead share back to `ACTIVE` (clears failure count, last error, and retry-after) so the scheduler picks it up again
 - `POST /crawler/pause` on `admin-addr`: stop scheduling crawls. The in-flight share finishes its current page and writes its checkpoint, then the loop parks until resumed; nothing is recorded as a failure. Idempotent.
 - `POST /crawler/resume` on `admin-addr`: resume crawling from the last checkpoint
 - `GET /crawler/state` on `admin-addr`: current crawler state — `{"state":"running"}` or `{"state":"paused"}`
