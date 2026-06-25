@@ -113,3 +113,23 @@ func TestPlanDocsDeterministicAcrossInputOrder(t *testing.T) {
 		t.Fatalf("not deterministic across input order: a=%v b=%v", a, b)
 	}
 }
+
+func TestStem(t *testing.T) {
+	cases := []struct {
+		label string
+		f     model.File
+		want  string
+	}{
+		{"file strips ext", model.File{Name: "S01E18.mkv", Ext: "mkv"}, "S01E18"},
+		{"file keeps dotpack", model.File{Name: "Show.S01E01.1080p.mkv", Ext: "mkv"}, "Show.S01E01.1080p"},
+		{"file no ext unchanged", model.File{Name: "README"}, "README"},
+		{"file empty ext unchanged", model.File{Name: "movie.mkv", Ext: ""}, "movie.mkv"},
+		{"dir verbatim", model.File{Name: "2024合集", IsDir: true}, "2024合集"},
+		{"dir with dot verbatim", model.File{Name: "v2.0", IsDir: true, Ext: "0"}, "v2.0"},
+	}
+	for _, c := range cases {
+		if got := stem(c.f); got != c.want {
+			t.Errorf("%s: stem=%q, want %q", c.label, got, c.want)
+		}
+	}
+}

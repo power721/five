@@ -3,6 +3,7 @@ package searchindex
 import (
 	"regexp"
 	"sort"
+	"strings"
 
 	"five/internal/model"
 )
@@ -27,6 +28,19 @@ const movieSizeThreshold int64 = 10 * 1024 * 1024 * 1024
 // is not merged as a movie. Bare "E" + digits uses a word boundary and 2–3
 // digits to avoid matching years such as "E2015".
 var episodeMarker = regexp.MustCompile(`(?i)(S\d{1,2}E\d{1,3})|(EP\d{1,3})|(第\d{1,3}[集话話])|(\bE\d{2,3}\b)`)
+
+// stem returns the name to index for a row: the filename minus its extension
+// (S01E18.mkv -> S01E18), so episode codes match cleanly and a search for an
+// extension does not surface every file of that format. Directory names are
+// returned verbatim (a folder like "2024合集" has no meaningful extension).
+// Ext is extracted by the crawler and stored on the row; when absent the full
+// name is indexed unchanged.
+func stem(f model.File) string {
+	if !f.IsDir && f.Ext != "" {
+		return strings.TrimSuffix(f.Name, "."+f.Ext)
+	}
+	return f.Name
+}
 
 // indexedDoc is one bleve document Rebuild should emit.
 type indexedDoc struct {
