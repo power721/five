@@ -110,6 +110,12 @@ files), not only the rollup. Directory names are indexed verbatim (a folder name
   on the full row) — only the text placed into the doc's `names` is stemmed.
 - Effect: cleaner episode-code matches, and a search for an extension no longer
   returns every file of that format.
+- **Folder docs also normalize dots to spaces.** bleve's standard analyzer keeps
+  `Show.S01E01` (letter·MidNumLet·letter per UAX#29) as one token, so a bare
+  `Show` search would miss an absorbed episode name. `folderNames` replaces `.` →
+  ` `, so each segment (`Show`, `S01E01`) is its own searchable token and
+  searching the show name finds the folder. Applies only to folder docs; loose
+  movie/episode docs are unchanged (no regression).
 
 ### Composition with existing content-dedup (`planDocs`)
 
