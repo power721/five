@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"five/internal/api115"
@@ -557,5 +558,46 @@ func TestCrawlerDoesNotOverwriteExistingShareTitle(t *testing.T) {
 	}
 	if len(store.metaUpdates) != 0 {
 		t.Fatalf("expected no meta update when title already set, got %#v", store.metaUpdates)
+	}
+}
+
+func TestCrawlerReturnsErrPausedAfterCurrentPage(t *testing.T) {
+	// The pause checker is polled at the top of the page loop. It returns false
+	// before the first page (so the in-flight page completes) and true before the
+	// second page, so the crawl stops after page 1 with ErrPaused — never starting
+	// page 2. This is the "stop ASAP after the current page" contract.
+	var checks atomic.Int32
+	checker := func() bool {
+		return checks.Add(1) > 1
+	}
+	lister := &fakeLister{
+		pages: map[string][]Page{
+			"0": {
+				{
+					Nodes: []model.File{
+						{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "A.mkv", Ext: "mkv"},
+					},
+					HasMore: true,
+				},
+				{
+					Nodes: []model.File{
+						{FileID: "f2", ShareCode: "sw1", ParentID: "0", Name: "B.mkv", Ext: "mkv"},
+					},
+					HasMore: false,
+				},
+			},
+		},
+	}
+	store := &memoryStore{}
+	c := New(lister, store, Config{PageSize: 1, PauseChecker: checker})
+	share := model.Share{ShareCode: "sw1", ReceiveCode: "echo"}
+
+	err := c.CrawlShare(context.Background(), share, 100)
+	if !errors.Is(err, ErrPaused) {
+		t.Fatalf("err = %v, want ErrPaused", err)
+	}
+	// The current page finished (f1 upserted); the next page never started (no f2).
+	if len(store.files) != 1 || store.files[0].FileID != "f1" {
+		t.Fatalf("stored files = %#v, want [f1] (current page completes, next does not start)", store.files)
 	}
 }

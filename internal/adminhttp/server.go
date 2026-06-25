@@ -26,6 +26,15 @@ type Store interface {
 	DeleteShare(ctx context.Context, shareCode string) (bool, error)
 }
 
+// CrawlerControl drives the daemon's scheduler crawl loop. nil means no
+// crawler is attached (admin server without the scheduler); the crawler
+// endpoints then return 503.
+type CrawlerControl interface {
+	Pause()
+	Resume()
+	Paused() bool
+}
+
 type StatusResponse struct {
 	ShareCount int `json:"share_count"`
 	FileCount  int `json:"file_count"`
@@ -53,20 +62,25 @@ type ShareDetailResponse struct {
 }
 
 type Server struct {
-	store  Store
-	mux    *http.ServeMux
-	logger *log.Logger
+	store   Store
+	control CrawlerControl
+	mux     *http.ServeMux
+	logger  *log.Logger
 }
 
-func New(store Store, logWriter io.Writer) *Server {
+func New(store Store, control CrawlerControl, logWriter io.Writer) *Server {
 	s := &Server{
-		store:  store,
-		mux:    http.NewServeMux(),
-		logger: logutil.New(logWriter),
+		store:   store,
+		control: control,
+		mux:     http.NewServeMux(),
+		logger:  logutil.New(logWriter),
 	}
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/shares", s.handleShares)
 	s.mux.HandleFunc("/shares/", s.handleShareDetail)
+	s.mux.HandleFunc("/crawler/pause", s.handleCrawlerPause)
+	s.mux.HandleFunc("/crawler/resume", s.handleCrawlerResume)
+	s.mux.HandleFunc("/crawler/state", s.handleCrawlerState)
 	return s
 }
 
@@ -321,6 +335,65 @@ func (s *Server) handleShareDelete(w http.ResponseWriter, r *http.Request, share
 		"deleted":    true,
 		"file_count": fileCount,
 	})
+}
+
+// requireControl writes a 503 and returns false when no crawler control is
+// attached (admin server running without the daemon's scheduler).
+func (s *Server) requireControl(w http.ResponseWriter) bool {
+	if s.control == nil {
+		http.Error(w, "crawler control unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
+}
+
+type crawlerStateResponse struct {
+	State string `json:"state"`
+}
+
+// handleCrawlerPause implements POST /crawler/pause. Idempotent: pausing an
+// already-paused crawler still returns 200.
+func (s *Server) handleCrawlerPause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w) {
+		return
+	}
+	s.control.Pause()
+	s.logger.Printf("event=crawler_paused")
+	writeJSON(w, http.StatusOK, crawlerStateResponse{State: "paused"})
+}
+
+// handleCrawlerResume implements POST /crawler/resume.
+func (s *Server) handleCrawlerResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w) {
+		return
+	}
+	s.control.Resume()
+	s.logger.Printf("event=crawler_resumed")
+	writeJSON(w, http.StatusOK, crawlerStateResponse{State: "running"})
+}
+
+// handleCrawlerState implements GET /crawler/state.
+func (s *Server) handleCrawlerState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w) {
+		return
+	}
+	state := "running"
+	if s.control.Paused() {
+		state = "paused"
+	}
+	writeJSON(w, http.StatusOK, crawlerStateResponse{State: state})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

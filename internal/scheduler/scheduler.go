@@ -33,6 +33,7 @@ type Scheduler struct {
 	logger   *log.Logger
 	sleep    func(context.Context, time.Duration) error
 	now      func() time.Time
+	gate     *PauseGate
 }
 
 func New(registry Registry, runner Runner, logWriter io.Writer) *Scheduler {
@@ -45,6 +46,22 @@ func New(registry Registry, runner Runner, logWriter io.Writer) *Scheduler {
 	}
 }
 
+// SetPauseGate attaches a pause switch. When set and paused, RunOnce short-
+// circuits with errPaused (no share is crawled or marked failed) and RunLoop
+// parks until the gate is resumed. Daemon-only; nil (the default) means the
+// scheduler never pauses.
+func (s *Scheduler) SetPauseGate(g *PauseGate) { s.gate = g }
+
+func (s *Scheduler) paused() bool { return s.gate != nil && s.gate.Paused() }
+
+// errPaused signals that a run was aborted because the pause gate is on. It is
+// not a real error: RunLoop treats it as "park until resumed".
+var errPaused = errors.New("scheduler paused")
+
+// pausePollInterval is how often RunLoop re-checks the pause gate while parked.
+// Package-level var so tests can shrink it.
+var pausePollInterval = 500 * time.Millisecond
+
 func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 	shares, err := s.registry.ListSharesForCrawl(ctx, now)
 	if err != nil {
@@ -52,6 +69,9 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 	}
 	proxyFailureOnly := len(shares) > 0
 	for _, share := range shares {
+		if s.paused() {
+			return false, errPaused
+		}
 		s.logger.Printf("event=share_crawl_started share=%s", share.ShareCode)
 		err := s.runner.CrawlShare(ctx, share, now)
 		switch {
@@ -68,6 +88,11 @@ func (s *Scheduler) RunOnce(ctx context.Context, now int64) (bool, error) {
 			}
 			s.logger.Printf("event=share_crawl_finished share=%s result=dead error=%q", share.ShareCode, err.Error())
 		default:
+			if s.paused() {
+				// The crawler bailed because the gate went on mid-share. Treat it
+				// as a pause, not a failure — no RecordShareFailure, no shelve.
+				return false, errPaused
+			}
 			if api115.IsEmptyDataError(err) && share.FailureCount+1 >= emptyDataGiveUpFailures {
 				// "empty data with nonzero count" is retryable in case a cookie
 				// refresh clears it, but for some shares 115 never returns data.
@@ -113,7 +138,19 @@ func (s *Scheduler) RunLoop(ctx context.Context, interval time.Duration) error {
 	proxyFailureRuns := 0
 
 	for {
+		if s.paused() {
+			// Park until resumed or shut down. RunOnce is not called while paused,
+			// so no share is crawled.
+			if err := s.waitForResume(ctx); err != nil {
+				return nil
+			}
+			continue
+		}
 		proxyFailureOnly, err := s.RunOnce(ctx, s.now().Unix())
+		if errors.Is(err, errPaused) {
+			// Pause hit mid-cycle; loop top parks until resume.
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -168,4 +205,20 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// waitForResume blocks while the gate is paused, returning ctx.Err() if the
+// daemon shuts down first, or nil once the gate is resumed.
+func (s *Scheduler) waitForResume(ctx context.Context) error {
+	timer := time.NewTimer(pausePollInterval)
+	defer timer.Stop()
+	for s.paused() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			timer.Reset(pausePollInterval)
+		}
+	}
+	return nil
 }

@@ -117,7 +117,7 @@ func TestServerReactivateShare(t *testing.T) {
 			{ShareCode: "sw1", Status: "QUARANTINE", FailureCount: 9, RetryAfterUnix: 9999999999, LastError: "empty data"},
 		},
 	}
-	srv := New(store, &bytes.Buffer{})
+	srv := New(store, nil, &bytes.Buffer{})
 
 	req := httptest.NewRequest(http.MethodPost, "/shares/sw1/reactivate", nil)
 	rr := httptest.NewRecorder()
@@ -160,7 +160,7 @@ func TestServerDeleteShare(t *testing.T) {
 	store := &fakeStore{
 		shares: []model.Share{{ShareCode: "empty", Status: "ACTIVE"}},
 	}
-	srv := New(store, &bytes.Buffer{})
+	srv := New(store, nil, &bytes.Buffer{})
 
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/empty", nil))
@@ -176,7 +176,7 @@ func TestServerDeleteShare(t *testing.T) {
 		shares:   []model.Share{{ShareCode: "full", Status: "ACTIVE"}},
 		fileStats: map[string]fakeFileStats{"full": {count: 5, total: 100}},
 	}
-	srv = New(store, &bytes.Buffer{})
+	srv = New(store, nil, &bytes.Buffer{})
 	rr = httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/full", nil))
 	if rr.Code != http.StatusConflict {
@@ -205,7 +205,7 @@ func TestServerDeleteShare(t *testing.T) {
 
 	// Unknown share -> 404.
 	store = &fakeStore{}
-	srv = New(store, &bytes.Buffer{})
+	srv = New(store, nil, &bytes.Buffer{})
 	rr = httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/shares/nope", nil))
 	if rr.Code != http.StatusNotFound {
@@ -214,7 +214,7 @@ func TestServerDeleteShare(t *testing.T) {
 
 	// Detail GET still works (routing must not swallow it).
 	store = &fakeStore{shares: []model.Share{{ShareCode: "sw1", Status: "ACTIVE"}}}
-	srv = New(store, &bytes.Buffer{})
+	srv = New(store, nil, &bytes.Buffer{})
 	rr = httptest.NewRecorder()
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1", nil))
 	if rr.Code != http.StatusOK {
@@ -229,7 +229,7 @@ func TestStatusReturnsShareAndFileCounts(t *testing.T) {
 		listSharesErr: errors.New("status must not load shares"),
 		allFilesErr:   errors.New("status must not load files"),
 	}
-	srv := New(store, nil)
+	srv := New(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rr := httptest.NewRecorder()
@@ -253,7 +253,7 @@ func TestStatusReturnsShareAndFileCounts(t *testing.T) {
 func TestPostSharesAcceptsShareURL(t *testing.T) {
 	store := &fakeStore{}
 	var logs bytes.Buffer
-	srv := New(store, &logs)
+	srv := New(store, nil, &logs)
 
 	body := bytes.NewBufferString(`{"share_url":"https://115.com/s/swf01d43zby?password=echo"}`)
 	req := httptest.NewRequest(http.MethodPost, "/shares", body)
@@ -281,7 +281,7 @@ func TestPostSharesAcceptsShareURL(t *testing.T) {
 func TestPostSharesAcceptsUploadedSharesFile(t *testing.T) {
 	store := &fakeStore{}
 	var logs bytes.Buffer
-	srv := New(store, &logs)
+	srv := New(store, nil, &logs)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -323,7 +323,7 @@ func TestSharesReturnsAllRegisteredShares(t *testing.T) {
 			{ShareCode: "sw1", ReceiveCode: "a", Status: "ACTIVE", FailureCount: 0},
 		},
 	}
-	srv := New(store, nil)
+	srv := New(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/shares", nil)
 	rr := httptest.NewRecorder()
@@ -366,7 +366,7 @@ func TestShareDetailReturnsCheckpointProgress(t *testing.T) {
 			},
 		},
 	}
-	srv := New(store, nil)
+	srv := New(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/shares/sw1", nil)
 	rr := httptest.NewRecorder()
@@ -405,7 +405,7 @@ func TestShareDetailReturnsLinkFileCountAndTotalSize(t *testing.T) {
 			"sw1": {count: 2, total: 3500},
 		},
 	}
-	srv := New(store, nil)
+	srv := New(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/shares/sw1", nil)
 	rr := httptest.NewRecorder()
@@ -430,5 +430,101 @@ func TestShareDetailReturnsLinkFileCountAndTotalSize(t *testing.T) {
 	// Existing detail fields are preserved.
 	if body.ShareCode != "sw1" || body.Status != "ACTIVE" {
 		t.Fatalf("existing fields lost: %#v", body)
+	}
+}
+
+type fakeControl struct {
+	paused bool
+}
+
+func (f *fakeControl) Pause()       { f.paused = true }
+func (f *fakeControl) Resume()      { f.paused = false }
+func (f *fakeControl) Paused() bool { return f.paused }
+
+func doRequest(srv *Server, method, target string) *httptest.ResponseRecorder {
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(method, target, nil))
+	return rr
+}
+
+func assertStateBody(t *testing.T, body string, want string) {
+	t.Helper()
+	var resp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode state response %q: %v", body, err)
+	}
+	if resp.State != want {
+		t.Fatalf("state = %q, want %q (body=%s)", resp.State, want, body)
+	}
+}
+
+func TestCrawlerPauseResumeState(t *testing.T) {
+	control := &fakeControl{}
+	srv := New(&fakeStore{}, control, &bytes.Buffer{})
+
+	// Initial state: running.
+	rr := doRequest(srv, http.MethodGet, "/crawler/state")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("state status = %d, want 200", rr.Code)
+	}
+	assertStateBody(t, rr.Body.String(), "running")
+
+	// Pause -> 200, state=paused, control flipped on.
+	rr = doRequest(srv, http.MethodPost, "/crawler/pause")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pause status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if !control.paused {
+		t.Fatal("control not paused after POST /crawler/pause")
+	}
+	assertStateBody(t, rr.Body.String(), "paused")
+	rr = doRequest(srv, http.MethodGet, "/crawler/state")
+	assertStateBody(t, rr.Body.String(), "paused")
+
+	// Pause is idempotent.
+	rr = doRequest(srv, http.MethodPost, "/crawler/pause")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("idempotent pause status = %d, want 200", rr.Code)
+	}
+
+	// Resume -> 200, state=running, control flipped off.
+	rr = doRequest(srv, http.MethodPost, "/crawler/resume")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if control.paused {
+		t.Fatal("control still paused after POST /crawler/resume")
+	}
+	assertStateBody(t, rr.Body.String(), "running")
+
+	// Wrong methods -> 405.
+	if rr := doRequest(srv, http.MethodGet, "/crawler/pause"); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /crawler/pause status = %d, want 405", rr.Code)
+	}
+	if rr := doRequest(srv, http.MethodDelete, "/crawler/resume"); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("DELETE /crawler/resume status = %d, want 405", rr.Code)
+	}
+	if rr := doRequest(srv, http.MethodPost, "/crawler/state"); rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /crawler/state status = %d, want 405", rr.Code)
+	}
+}
+
+func TestCrawlerPauseEndpointsReturn503WhenNoControl(t *testing.T) {
+	srv := New(&fakeStore{}, nil, &bytes.Buffer{})
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/crawler/pause"},
+		{http.MethodPost, "/crawler/resume"},
+		{http.MethodGet, "/crawler/state"},
+	}
+	for _, c := range cases {
+		rr := doRequest(srv, c.method, c.path)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s status = %d, want 503", c.method, c.path, rr.Code)
+		}
 	}
 }

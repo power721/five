@@ -245,8 +245,10 @@ func main() {
 			ProxyPool:   proxyAccess{manager: proxyMgr, provider: proxyProvider, validator: validator},
 		}
 		lister := apiLister{client: client}
-		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
+		gate := scheduler.NewPauseGate()
+		c := crawler.New(lister, s, crawler.Config{PageSize: 100, PauseChecker: gate.Paused})
 		sched := scheduler.New(s, c, log.Writer())
+		sched.SetPauseGate(gate)
 		log.Printf(
 			"event=daemon_start scheduler_interval=%s proxy_enabled=%t admin_addr=%q metrics_addr=%q",
 			pollInterval(*schedulerInterval, time.Minute),
@@ -292,7 +294,7 @@ func main() {
 				log.Printf("event=admin_server_start addr=%q", addr)
 				server := &http.Server{
 					Addr:    addr,
-					Handler: adminhttp.New(s, log.Writer()),
+					Handler: adminhttp.New(s, gate, log.Writer()),
 				}
 				errCh := make(chan error, 1)
 				go func() {

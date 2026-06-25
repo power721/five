@@ -395,3 +395,100 @@ func TestSchedulerDedupesShareTitlesAfterCrawl(t *testing.T) {
 		t.Fatalf("missing dedupe log: %q", buf.String())
 	}
 }
+
+// pauseMidShareRunner flips the pause gate on when called and returns an error,
+// simulating a crawler that noticed the pause mid-share and bailed out.
+type pauseMidShareRunner struct {
+	gate *PauseGate
+}
+
+func (r *pauseMidShareRunner) CrawlShare(context.Context, model.Share, int64) error {
+	r.gate.Pause()
+	return errors.New("paused mid-share")
+}
+
+func TestSchedulerRunOnceReturnsPausedWhenGatePaused(t *testing.T) {
+	calls := &atomic.Int32{}
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "s1", ReceiveCode: "a"},
+			{ShareCode: "s2", ReceiveCode: "b"},
+		},
+	}
+	s := New(store, countingRunner{calls: calls}, nil)
+	gate := NewPauseGate()
+	gate.Pause()
+	s.SetPauseGate(gate)
+
+	_, err := s.RunOnce(context.Background(), 1)
+	if !errors.Is(err, errPaused) {
+		t.Fatalf("err = %v, want errPaused", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("runner calls = %d, want 0 (paused gate must skip crawl)", calls.Load())
+	}
+	if len(store.markedFailed) != 0 || len(store.markedCrawled) != 0 {
+		t.Fatalf("paused run must not mark shares: failed=%#v crawled=%#v", store.markedFailed, store.markedCrawled)
+	}
+}
+
+func TestSchedulerRunOnceDoesNotRecordFailureWhenCrawlerPausedMidShare(t *testing.T) {
+	gate := NewPauseGate()
+	store := &registryStore{
+		shares: []model.Share{
+			{ShareCode: "s1", ReceiveCode: "a"},
+		},
+	}
+	s := New(store, &pauseMidShareRunner{gate: gate}, nil)
+	s.SetPauseGate(gate)
+
+	_, err := s.RunOnce(context.Background(), 1)
+	if !errors.Is(err, errPaused) {
+		t.Fatalf("err = %v, want errPaused", err)
+	}
+	if len(store.markedFailed) != 0 {
+		t.Fatalf("must not record failure when crawler paused mid-share; markedFailed=%#v", store.markedFailed)
+	}
+}
+
+func TestSchedulerRunLoopWaitsForResume(t *testing.T) {
+	prevPoll := pausePollInterval
+	pausePollInterval = time.Millisecond
+	defer func() { pausePollInterval = prevPoll }()
+
+	calls := &atomic.Int32{}
+	store := &registryStore{
+		shares: []model.Share{{ShareCode: "s1", ReceiveCode: "a"}},
+	}
+	s := New(store, countingRunner{calls: calls}, nil)
+	gate := NewPauseGate()
+	s.SetPauseGate(gate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.RunLoop(ctx, 5*time.Millisecond) }()
+
+	// Let it crawl, then park. Measure the baseline only after it has settled
+	// into the paused wait so no in-flight call can shift it.
+	gate.Pause()
+	time.Sleep(30 * time.Millisecond)
+	before := calls.Load()
+	time.Sleep(30 * time.Millisecond)
+	if after := calls.Load(); after != before {
+		t.Fatalf("runner advanced while paused: before=%d after=%d", before, after)
+	}
+
+	gate.Resume()
+	time.Sleep(30 * time.Millisecond)
+	if resumed := calls.Load(); resumed <= before {
+		t.Fatalf("runner did not resume after unpause: before=%d after=%d", before, resumed)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunLoop did not return after cancel")
+	}
+}

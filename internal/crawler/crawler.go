@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -31,9 +32,18 @@ type Store interface {
 type Config struct {
 	PageSize   int
 	RetryCount int
+	// PauseChecker, when non-nil, is polled at the top of the page loop. If it
+	// reports true, CrawlShare finishes the current page, checkpoints, and
+	// returns ErrPaused instead of fetching the next page. Nil means never pause.
+	PauseChecker func() bool
 }
 
 const RootCID = "0"
+
+// ErrPaused is returned by CrawlShare when PauseChecker reports the crawler is
+// paused. The in-flight page completes and is checkpointed first, so the share
+// resumes cleanly from the next page on the next crawl.
+var ErrPaused = errors.New("crawler paused")
 
 type Crawler struct {
 	lister Lister
@@ -104,6 +114,9 @@ func (c *Crawler) CrawlShare(ctx context.Context, share model.Share, crawledAt i
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if c.cfg.PauseChecker != nil && c.cfg.PauseChecker() {
+				return ErrPaused
 			}
 			cp := model.Checkpoint{
 				ShareCode:   share.ShareCode,
