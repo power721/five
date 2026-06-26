@@ -62,6 +62,12 @@ without indexing; `DUPLICATE` shares are excluded from scheduling and `export-db
 `-mode cleanup-orphans [-apply]` removes files whose share row is gone (e.g. a
 share deleted mid-crawl).
 
+A 115 share is an immutable snapshot, so once a share's crawl fully drains it is
+marked `COMPLETED` and never re-queued by the scheduler (it is still included in
+`export-db` with its files). To force a fresh re-crawl — e.g. after
+`validate-share-counts` reports a mismatch — `POST /shares/<share_code>/reactivate`
+resets it to `ACTIVE`.
+
 ```bash
 go run ./cmd/115-indexer \
   -mode crawl \

@@ -830,9 +830,15 @@ func (s *Store) ListSharesForCrawl(ctx context.Context, now int64) ([]model.Shar
 	return shares, rows.Err()
 }
 
+// MarkShareCrawled records that a share's BFS crawl fully drained — i.e. its
+// 115 snapshot has been completely indexed — and parks it at the terminal
+// COMPLETED status so the scheduler stops re-queueing it. 115 shares are
+// immutable snapshots, so a completed crawl never needs repeating; use
+// ReactivateShare to force a re-crawl. Clears failure bookkeeping and bumps
+// version. Updates 0 rows (no error) if the share is not registered.
 func (s *Store) MarkShareCrawled(ctx context.Context, shareCode string, crawledAt int64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE share
-		SET status='ACTIVE',
+		SET status='COMPLETED',
 			last_crawled_at=?,
 			last_error='',
 			failure_count=0,

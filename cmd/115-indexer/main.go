@@ -84,11 +84,7 @@ func main() {
 		}
 		lister := apiLister{client: client}
 		c := crawler.New(lister, s, crawler.Config{PageSize: 100})
-		share := model.Share{
-			ShareCode:   *shareCode,
-			ReceiveCode: *receiveCode,
-		}
-		if err := c.CrawlShare(ctx, share, time.Now().Unix()); err != nil {
+		if err := runCrawlOnce(ctx, s, c, *shareCode, *receiveCode, time.Now().Unix()); err != nil {
 			log.Fatalf("crawl share: %v", err)
 		}
 	case "register-share":

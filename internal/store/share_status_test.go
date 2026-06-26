@@ -133,3 +133,84 @@ func TestSQLiteStoreReactivateShareClearsShelfAndReschedules(t *testing.T) {
 		t.Fatalf("reactivate unknown: ok=%v err=%v, want false/nil", ok, err)
 	}
 }
+
+func TestSQLiteStoreCompletedShareExcludedFromCrawl(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "p", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("upsert share: %v", err)
+	}
+	// ACTIVE → due now.
+	due, err := s.ListSharesForCrawl(ctx, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("list due before: %v", err)
+	}
+	if len(due) != 1 || due[0].ShareCode != "sw1" {
+		t.Fatalf("due before = %#v, want [sw1]", due)
+	}
+
+	// A complete crawl parks it at COMPLETED: no longer due.
+	if err := s.MarkShareCrawled(ctx, "sw1", time.Now().Unix()); err != nil {
+		t.Fatalf("mark crawled: %v", err)
+	}
+	due, err = s.ListSharesForCrawl(ctx, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("list due after: %v", err)
+	}
+	for _, sh := range due {
+		if sh.ShareCode == "sw1" {
+			t.Fatalf("COMPLETED share must not be due for crawl; got %#v", sh)
+		}
+	}
+}
+
+func TestSQLiteStoreReactivateShareResetsCompleted(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "p", Status: "ACTIVE"}); err != nil {
+		t.Fatalf("upsert share: %v", err)
+	}
+	if err := s.MarkShareCrawled(ctx, "sw1", 123); err != nil {
+		t.Fatalf("mark crawled: %v", err)
+	}
+	if got, _, _ := s.GetShare(ctx, "sw1"); got.Status != "COMPLETED" {
+		t.Fatalf("precondition: status = %q, want COMPLETED", got.Status)
+	}
+
+	ok, err := s.ReactivateShare(ctx, "sw1")
+	if err != nil || !ok {
+		t.Fatalf("reactivate: ok=%v err=%v", ok, err)
+	}
+	got, _, err := s.GetShare(ctx, "sw1")
+	if err != nil {
+		t.Fatalf("get share: %v", err)
+	}
+	if got.Status != "ACTIVE" || got.RetryAfterUnix != 0 {
+		t.Fatalf("after reactivation = status=%q retry_after=%d, want ACTIVE/0", got.Status, got.RetryAfterUnix)
+	}
+
+	// Due for crawl again after reactivation.
+	due, err := s.ListSharesForCrawl(ctx, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("list due: %v", err)
+	}
+	var found bool
+	for _, sh := range due {
+		if sh.ShareCode == "sw1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("reactivated COMPLETED share must be due for crawl again")
+	}
+}

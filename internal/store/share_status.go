@@ -25,11 +25,12 @@ func (s *Store) MarkShareShelved(ctx context.Context, shareCode, errText string)
 	return err
 }
 
-// ReactivateShare resets a shelved/quarantined/dead share back to ACTIVE so the
-// scheduler picks it up again on its next pass: clears the failure count, last
-// error, and any far-future retry_after. Returns false if no share matched
-// shareCode. Use it to retry a share that was shelved for a persistent error
-// once the underlying 115 condition may have cleared.
+// ReactivateShare resets a shelved/quarantined/dead/completed share back to
+// ACTIVE so the scheduler picks it up again on its next pass: clears the
+// failure count, last error, duplicate_of, and any far-future retry_after.
+// Returns false if no share matched shareCode. Use it to retry a share that
+// was shelved for a persistent error once the underlying 115 condition may
+// have cleared, or to force a fresh re-crawl of a COMPLETED share.
 // MarkShareDuplicate records that shareCode is a duplicate of canonical (same
 // file_size, above the dedup threshold) and parks it: DUPLICATE status is
 // excluded from scheduling and export. Clears failure bookkeeping.

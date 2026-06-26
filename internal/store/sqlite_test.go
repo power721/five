@@ -289,8 +289,8 @@ func TestSQLiteStoreShareRegistryAndStateTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get share after crawl: %v", err)
 	}
-	if got.Status != "ACTIVE" {
-		t.Fatalf("status after mark crawled = %q, want ACTIVE", got.Status)
+	if got.Status != "COMPLETED" {
+		t.Fatalf("status after mark crawled = %q, want COMPLETED", got.Status)
 	}
 
 	if err := s.MarkShareDead(ctx, share.ShareCode, "invalid receive code"); err != nil {
@@ -1162,5 +1162,53 @@ func TestOpenTrimmedDBKeepsCrawledAtByDefault(t *testing.T) {
 	defer s2.Close()
 	if err := s2.db.QueryRowContext(ctx, `SELECT crawled_at FROM file WHERE share_code='sw1' LIMIT 1`).Scan(new(int64)); err != nil {
 		t.Fatalf("read crawled_at after open: %v", err)
+	}
+}
+
+func TestExportTrimmedKeepsCompletedShareAndFiles(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	// A fully-crawled (COMPLETED) share with a file — must survive export intact,
+	// unlike DEAD/DUPLICATE which are pruned with their files.
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "rc1"}); err != nil {
+		t.Fatalf("upsert share sw1: %v", err)
+	}
+	if err := s.MarkShareCrawled(ctx, "sw1", 42); err != nil {
+		t.Fatalf("mark share crawled: %v", err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{
+		{FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "a.mkv", Ext: "mkv", CrawledAt: 42},
+	}); err != nil {
+		t.Fatalf("upsert files sw1: %v", err)
+	}
+
+	trimmed := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, trimmed); err != nil {
+		t.Fatalf("export trimmed: %v", err)
+	}
+	s.Close()
+
+	db, err := sql.Open("sqlite", trimmed)
+	if err != nil {
+		t.Fatalf("open trimmed: %v", err)
+	}
+	defer db.Close()
+
+	var status string
+	if err := db.QueryRowContext(ctx, "SELECT status FROM share WHERE share_code='sw1'").Scan(&status); err != nil {
+		t.Fatalf("read exported share: %v", err)
+	}
+	if status != "COMPLETED" {
+		t.Fatalf("exported share status = %q, want COMPLETED (must not be pruned)", status)
+	}
+	var files int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM file WHERE share_code='sw1'").Scan(&files)
+	if files != 1 {
+		t.Fatalf("exported files = %d, want 1 (COMPLETED share keeps its files)", files)
 	}
 }
