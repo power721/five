@@ -78,8 +78,16 @@ func (s *Store) ExportSnapshot(ctx context.Context, destPath string) error {
 // Crawler/indexer internals (checkpoints, events, manifest, kv) are excluded.
 // Shares marked DEAD (e.g. cancelled) and the files that belonged to them are
 // also dropped: a dead share's files are unreachable, so they must not ship.
+type ExportTrimmedOptions struct {
+	StripFileCrawledAt bool
+}
+
 // destPath is overwritten if it exists; the result has no -wal/-shm sidecar.
-func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
+func (s *Store) ExportTrimmed(ctx context.Context, destPath string, options ...ExportTrimmedOptions) error {
+	var opts ExportTrimmedOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	if dir := filepath.Dir(destPath); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -124,35 +132,34 @@ func (s *Store) ExportTrimmed(ctx context.Context, destPath string) error {
 			return fmt.Errorf("prune dead/duplicate shares %q: %w", stmt, err)
 		}
 	}
-	// The file table ships to consumers; strip crawled_at (crawler bookkeeping
-	// they don't use), keeping updated_at (consumers read it). SQLite can't DROP
-	// COLUMN without leaving a duplicate index on this build, so rebuild the
-	// table and recreate its indexes, like migrateFileCompositePK does.
-	for _, stmt := range []string{
-		`CREATE TABLE file_new (
-			file_id TEXT NOT NULL,
-			share_code TEXT NOT NULL,
-			parent_id TEXT NOT NULL,
-			name TEXT NOT NULL,
-			ext TEXT NOT NULL DEFAULT '',
-			size INTEGER NOT NULL DEFAULT 0,
-			is_dir INTEGER NOT NULL DEFAULT 0,
-			depth INTEGER NOT NULL DEFAULT 0,
-			sha1 TEXT NOT NULL DEFAULT '',
-			updated_at INTEGER,
-			PRIMARY KEY (share_code, file_id)
-		);`,
-		`INSERT INTO file_new (file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at)
-			SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at FROM file;`,
-		`DROP TABLE file;`,
-		`ALTER TABLE file_new RENAME TO file;`,
-		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
-	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("strip file columns %q: %w", stmt, err)
+	if opts.StripFileCrawledAt {
+		// SQLite can't DROP COLUMN without leaving a duplicate index on this build,
+		// so rebuild the table and recreate its indexes, like migrateFileCompositePK does.
+		for _, stmt := range []string{
+			`CREATE TABLE file_new (
+				file_id TEXT NOT NULL,
+				share_code TEXT NOT NULL,
+				parent_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				ext TEXT NOT NULL DEFAULT '',
+				size INTEGER NOT NULL DEFAULT 0,
+				is_dir INTEGER NOT NULL DEFAULT 0,
+				depth INTEGER NOT NULL DEFAULT 0,
+				sha1 TEXT NOT NULL DEFAULT '',
+				updated_at INTEGER,
+				PRIMARY KEY (share_code, file_id)
+			);`,
+			`INSERT INTO file_new (file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at)
+				SELECT file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, updated_at FROM file;`,
+			`DROP TABLE file;`,
+			`ALTER TABLE file_new RENAME TO file;`,
+			`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
+			`CREATE INDEX IF NOT EXISTS idx_file_id ON file(file_id);`,
+		} {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("strip file columns %q: %w", stmt, err)
+			}
 		}
 	}
 	if _, err := db.ExecContext(ctx, "VACUUM;"); err != nil {
@@ -216,8 +223,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			PRIMARY KEY (share_code, file_id)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
 		`CREATE TABLE IF NOT EXISTS crawl_checkpoint (
 			share_code TEXT PRIMARY KEY,
@@ -241,6 +246,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			value TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_id ON file(file_id);`,
+		`DROP INDEX IF EXISTS idx_file_ext;`,
+		`DROP INDEX IF EXISTS idx_file_depth;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -336,9 +343,8 @@ func (s *Store) migrateFileCompositePK(ctx context.Context) error {
 		`DROP TABLE file;`,
 		`ALTER TABLE file_new RENAME TO file;`,
 		`CREATE INDEX IF NOT EXISTS idx_file_share_parent ON file(share_code, parent_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_ext ON file(ext);`,
-		`CREATE INDEX IF NOT EXISTS idx_file_depth ON file(depth);`,
 		`CREATE INDEX IF NOT EXISTS idx_file_size ON file(size);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_id ON file(file_id);`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("rebuild file pk: %w", err)

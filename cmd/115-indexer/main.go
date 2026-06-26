@@ -42,6 +42,7 @@ func main() {
 		adminAddr         = flag.String("admin-addr", "", "admin HTTP listen address, e.g. :8080")
 		backfillDelay     = flag.Duration("backfill-delay", 500*time.Millisecond, "delay between share/snap requests in backfill-share-meta mode")
 		outPath           = flag.String("out", "", "output path for export-db mode, e.g. dist/index.db")
+		stripCrawledAt    = flag.Bool("strip-file-crawled-at", false, "remove file.crawled_at from export-db output")
 		apply             = flag.Bool("apply", false, "apply changes for dry-run modes (dedupe-share-titles, dedupe-shares-by-size, cleanup-orphans)")
 		dedupeMinSize     = flag.Int64("dedupe-min-size", 1<<30, "minimum file_size in bytes for share dedup by size (default 1GiB)")
 	)
@@ -353,7 +354,7 @@ func main() {
 		}
 		defer os.RemoveAll(tmp)
 		trimmedDB := filepath.Join(tmp, "index.db")
-		if err := s.ExportTrimmed(ctx, trimmedDB); err != nil {
+		if err := s.ExportTrimmed(ctx, trimmedDB, store.ExportTrimmedOptions{StripFileCrawledAt: *stripCrawledAt}); err != nil {
 			log.Fatalf("export trimmed: %v", err)
 		}
 		if err := buildPackage(trimmedDB, bleveSrc, *outPath); err != nil {

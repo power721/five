@@ -644,6 +644,74 @@ func TestSQLiteStoreMigrationDropsLegacyPathColumn(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreDropsUnusedFileIndexes(t *testing.T) {
+	ctx := context.Background()
+
+	fresh, cleanup := openTestStore(t)
+	defer cleanup()
+	assertFileIndex(t, fresh.db, "idx_file_share_parent", true)
+	assertFileIndex(t, fresh.db, "idx_file_size", true)
+	assertFileIndex(t, fresh.db, "idx_file_id", true)
+	assertFileIndex(t, fresh.db, "idx_file_ext", false)
+	assertFileIndex(t, fresh.db, "idx_file_depth", false)
+
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE file (
+		file_id TEXT NOT NULL,
+		share_code TEXT NOT NULL,
+		parent_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		ext TEXT NOT NULL DEFAULT '',
+		size INTEGER NOT NULL DEFAULT 0,
+		is_dir INTEGER NOT NULL DEFAULT 0,
+		depth INTEGER NOT NULL DEFAULT 0,
+		sha1 TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER,
+		crawled_at INTEGER NOT NULL,
+		PRIMARY KEY (share_code, file_id)
+	)`); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX idx_file_share_parent ON file(share_code, parent_id)`,
+		`CREATE INDEX idx_file_ext ON file(ext)`,
+		`CREATE INDEX idx_file_depth ON file(depth)`,
+		`CREATE INDEX idx_file_size ON file(size)`,
+		`CREATE INDEX idx_file_id ON file(file_id)`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("create index %q: %v", stmt, err)
+		}
+	}
+	raw.Close()
+
+	migrated, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer migrated.Close()
+	assertFileIndex(t, migrated.db, "idx_file_share_parent", true)
+	assertFileIndex(t, migrated.db, "idx_file_size", true)
+	assertFileIndex(t, migrated.db, "idx_file_id", true)
+	assertFileIndex(t, migrated.db, "idx_file_ext", false)
+	assertFileIndex(t, migrated.db, "idx_file_depth", false)
+}
+
+func assertFileIndex(t *testing.T, db *sql.DB, name string, want bool) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file' AND name=?`, name).Scan(&n); err != nil {
+		t.Fatalf("count index %s: %v", name, err)
+	}
+	if got := n == 1; got != want {
+		t.Fatalf("index %s exists = %v, want %v", name, got, want)
+	}
+}
+
 func TestExportTrimmedKeepsFileShareAndShareGroup(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
@@ -712,10 +780,14 @@ func TestExportTrimmedKeepsFileShareAndShareGroup(t *testing.T) {
 		t.Fatalf("counts files=%d shares=%d, want 1/1", files, shares)
 	}
 
-	var idx int
-	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file' AND name LIKE 'idx_file_%'").Scan(&idx)
-	if idx != 4 {
-		t.Fatalf("file indexes = %d, want 4", idx)
+	for _, name := range []string{"idx_file_share_parent", "idx_file_size", "idx_file_id"} {
+		var idx int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='file' AND name=?", name).Scan(&idx); err != nil {
+			t.Fatalf("count index %s: %v", name, err)
+		}
+		if idx != 1 {
+			t.Fatalf("index %s count = %d, want 1", name, idx)
+		}
 	}
 }
 
@@ -882,7 +954,7 @@ func TestExportTrimmedRetainsShareGroup(t *testing.T) {
 	}
 }
 
-func TestExportTrimmedStripsCrawledAtKeepsUpdatedAt(t *testing.T) {
+func TestExportTrimmedKeepsCrawledAtByDefault(t *testing.T) {
 	ctx := context.Background()
 	s, cleanup := openTestStore(t)
 	defer cleanup()
@@ -907,7 +979,57 @@ func TestExportTrimmedStripsCrawledAtKeepsUpdatedAt(t *testing.T) {
 	}
 	defer db.Close()
 
-	// crawled_at is stripped (crawler bookkeeping); updated_at is kept for consumers.
+	// crawled_at is kept by default so an exported DB can be reopened by five
+	// for rebuild-index; updated_at is kept for consumers.
+	var crawled, updated int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name='crawled_at'`).Scan(&crawled); err != nil {
+		t.Fatal(err)
+	}
+	if crawled != 1 {
+		t.Fatalf("trimmed file table missing crawled_at")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name='updated_at'`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("trimmed file table missing updated_at (consumers use it)")
+	}
+	// File data and timestamps survive.
+	var name string
+	var crawledAt, updatedAt int64
+	if err := db.QueryRowContext(ctx, `SELECT name, crawled_at, updated_at FROM file WHERE file_id='f1'`).Scan(&name, &crawledAt, &updatedAt); err != nil {
+		t.Fatalf("read file after export: %v", err)
+	}
+	if name != "movie.mkv" || crawledAt != 1 || updatedAt != 2 {
+		t.Fatalf("file = %q crawled_at=%d updated_at=%d, want movie.mkv / 1 / 2", name, crawledAt, updatedAt)
+	}
+}
+
+func TestExportTrimmedCanStripCrawledAt(t *testing.T) {
+	ctx := context.Background()
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	if err := s.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "r", Status: "ACTIVE"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertFiles(ctx, []model.File{{
+		FileID: "f1", ShareCode: "sw1", ParentID: "0", Name: "movie.mkv",
+		Ext: "mkv", Size: 100, SHA1: "abc", CrawledAt: 1, UpdatedAt: 2,
+	}}); err != nil {
+		t.Fatalf("upsert files: %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := s.ExportTrimmed(ctx, dest, ExportTrimmedOptions{StripFileCrawledAt: true}); err != nil {
+		t.Fatalf("ExportTrimmed() error = %v", err)
+	}
+	db, err := sql.Open("sqlite", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
 	var crawled, updated int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('file') WHERE name='crawled_at'`).Scan(&crawled); err != nil {
 		t.Fatal(err)
@@ -919,16 +1041,7 @@ func TestExportTrimmedStripsCrawledAtKeepsUpdatedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated != 1 {
-		t.Fatalf("trimmed file table missing updated_at (consumers use it)")
-	}
-	// File data and updated_at value survive.
-	var name string
-	var updatedAt int64
-	if err := db.QueryRowContext(ctx, `SELECT name, updated_at FROM file WHERE file_id='f1'`).Scan(&name, &updatedAt); err != nil {
-		t.Fatalf("read file after export: %v", err)
-	}
-	if name != "movie.mkv" || updatedAt != 2 {
-		t.Fatalf("file = %q updated_at=%d, want movie.mkv / 2", name, updatedAt)
+		t.Fatalf("trimmed file table missing updated_at")
 	}
 }
 
@@ -1012,5 +1125,42 @@ func TestExportTrimmedPrunesDuplicateAndDead(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("alive share = %d, want 1", n)
+	}
+}
+
+func TestOpenTrimmedDBKeepsCrawledAtByDefault(t *testing.T) {
+	ctx := context.Background()
+	src, cleanup := openTestStore(t)
+	defer cleanup()
+	if err := src.UpsertShare(ctx, model.Share{ShareCode: "sw1", ReceiveCode: "p", Status: "ACTIVE"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.db.ExecContext(ctx, `INSERT INTO file(file_id, share_code, parent_id, name, ext, size, is_dir, depth, sha1, crawled_at) VALUES('f1','sw1','0','a.mkv','mkv',1,0,1,'',1)`); err != nil {
+		t.Fatal(err)
+	}
+	trimmed := filepath.Join(t.TempDir(), "trimmed.db")
+	if err := src.ExportTrimmed(ctx, trimmed); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	// Sanity: the default exported DB keeps crawled_at for rebuild-index.
+	d, err := sql.Open("sqlite", trimmed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var has int
+	_ = d.QueryRowContext(ctx, "SELECT COUNT(*) FROM pragma_table_info('file') WHERE name='crawled_at'").Scan(&has)
+	d.Close()
+	if has != 1 {
+		t.Fatalf("trimmed file table missing crawled_at")
+	}
+
+	// The real assertion: opening the exported DB must not fail on file.crawled_at.
+	s2, err := Open(ctx, trimmed)
+	if err != nil {
+		t.Fatalf("Open trimmed DB failed: %v", err)
+	}
+	defer s2.Close()
+	if err := s2.db.QueryRowContext(ctx, `SELECT crawled_at FROM file WHERE share_code='sw1' LIMIT 1`).Scan(new(int64)); err != nil {
+		t.Fatalf("read crawled_at after open: %v", err)
 	}
 }

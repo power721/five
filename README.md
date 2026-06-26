@@ -158,6 +158,8 @@ go run ./cmd/115-indexer -mode export-db -db data/index.db -bleve data/bleve -ou
 
 `115.index.zip` contains a trimmed `index.db` (only `file` and `share` tables)
 and the READY bleve index under `bleve/`. It extracts to `index.db` + `bleve/`.
+By default the exported `file` table keeps `crawled_at`; pass
+`-strip-file-crawled-at` only for consumers that require that column removed.
 
 Manual publish to 115:
 
