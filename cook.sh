@@ -20,7 +20,7 @@ echo "rebuild-index"
 ./five -mode rebuild-index -db data/index.db -bleve data/bleve
 
 echo "export-db"
-./five -mode export-db -db data/index.db -bleve data/bleve -out 115.index.zip
+./five -mode export-db -db data/index.db -bleve data/bleve -out 115.index.zip -strip-file-crawled-at
 
 echo "done"
 ls -lh 115.index.zip

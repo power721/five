@@ -5,10 +5,17 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"five/internal/model"
 )
+
+// shareURLRe finds a 115 share URL anywhere in a line, e.g. the
+// "<title>\t<url>" rows in shares.txt/movies.txt where the title holds spaces.
+// The host is left open (115.com, 115cdn.com, ...) because ParseURL only cares
+// about the "/s/<code>" path.
+var shareURLRe = regexp.MustCompile(`https?://[^/\s]+/s/[^\s]+`)
 
 func Parse(r io.Reader) ([]model.Share, error) {
 	scanner := bufio.NewScanner(r)
@@ -23,6 +30,21 @@ func Parse(r io.Reader) ([]model.Share, error) {
 		}
 		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
 			share, err := ParseURL(line)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			}
+			key := share.ShareCode + "\x00" + share.ReceiveCode
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, share)
+			continue
+		}
+		// "<title>\t<url>" rows: the title may contain spaces, so find the URL
+		// anywhere in the line rather than relying on whitespace field counts.
+		if m := shareURLRe.FindString(line); m != "" {
+			share, err := ParseURL(m)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineNo, err)
 			}
