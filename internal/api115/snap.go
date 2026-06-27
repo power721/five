@@ -268,13 +268,24 @@ func (c *Client) listOnce(ctx context.Context, req ListRequest, proxyURL string)
 		return SnapResponse{}, err
 	}
 	if err := ClassifySnapError(out); err != nil {
-		// 115 reports the folder's total count on every page. An empty list with
-		// a positive count is the normal end-of-pagination signal when the caller
-		// has already paged past the last item (offset >= count): the snap for a
-		// 1-item folder at offset 100 returns count=1, list=[]. That is not the
-		// stale-cookie "empty data" failure, which only happens at offset 0, so
-		// return the empty page and let the caller treat the directory as done.
-		if IsEmptyDataError(err) && req.Offset >= out.Data.Count {
+		// An empty list with a positive count ("empty data with nonzero count")
+		// has two causes, distinguished by offset:
+		//
+		//   - offset == 0: a stale cookie. The caller has fetched nothing yet, so
+		//     there is no evidence the session works. Clear the cookie and return
+		//     the retryable error so the caller refreshes and retries.
+		//
+		//   - offset > 0: end of data. A non-first page is only reached after a
+		//     prior page returned real data, which proves the session is valid, so
+		//     this is not a stale cookie — it is 115 declining to serve more of
+		//     this folder. 115's pagination is unreliable past the first page: a
+		//     folder with count=102 serves offset=0 (100 items) then returns
+		//     list=[] at offset=100, where 2 items should remain. Returning the
+		//     empty page lets the caller finish the folder and keep what it has;
+		//     returning an error would retry pointlessly, fail, and shelve a
+		//     healthy share. (This also covers the offset>=count past-end case,
+		//     since count>0 there implies offset>0.)
+		if IsEmptyDataError(err) && req.Offset > 0 {
 			return out, nil
 		}
 		if IsEmptyDataError(err) {

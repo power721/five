@@ -230,6 +230,43 @@ func TestListTreatsPastEndPaginationAsEmpty(t *testing.T) {
 	}
 }
 
+// TestListTreatsMidPaginationEmptyAsDone reproduces a real 115 bug: a folder
+// reports count=102 and serves the first page (offset=0, 100 items), then at
+// offset=100 — where 2 more items should remain — returns count=102, list=[].
+// Because offset (100) < count (102), this is neither the offset>=count
+// past-end case nor the offset=0 stale-cookie case. The first page already
+// returned real data, proving the session is valid, so the empty second page
+// is 115 declining to serve the rest, not a stale cookie. List must return the
+// empty page so the caller finishes the folder and keeps its 100 good files,
+// instead of retrying, failing, and shelving a healthy share.
+func TestListTreatsMidPaginationEmptyAsDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"state": true,
+			"error": "",
+			"errno": 0,
+			"data": {"shareinfo": {"share_state": 1}, "count": 102, "list": [], "share_state": 1}
+		}`))
+	}))
+	defer server.Close()
+
+	client := &Client{BaseURL: server.URL, HTTPClient: &http.Client{}}
+	resp, err := client.List(context.Background(), ListRequest{
+		ShareCode:   "swzch7w3zh9",
+		ReceiveCode: "o8f4",
+		CID:         "2961071791032969948",
+		Offset:      100,
+		Limit:       100,
+	})
+	if err != nil {
+		t.Fatalf("mid-pagination empty (offset<count) should be an empty page, not an error: %v", err)
+	}
+	if len(resp.Data.List) != 0 {
+		t.Fatalf("list = %d items, want 0", len(resp.Data.List))
+	}
+}
+
 func TestListClearsCookiesWhenProxySwitches(t *testing.T) {
 	server := snapServer(t)
 	defer server.Close()
