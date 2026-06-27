@@ -24,6 +24,8 @@ type Store interface {
 	LoadCheckpoint(ctx context.Context, shareCode string) (model.Checkpoint, bool, error)
 	ReactivateShare(ctx context.Context, shareCode string) (bool, error)
 	DeleteShare(ctx context.Context, shareCode string) (bool, error)
+	RenameShareTitle(ctx context.Context, shareCode, newTitle string) (bool, error)
+	FindShareTitleConflict(ctx context.Context, newTitle, excludeCode string) (string, bool, error)
 }
 
 // CrawlerControl drives the daemon's scheduler crawl loop. nil means no
@@ -43,6 +45,7 @@ type StatusResponse struct {
 type ShareProgress struct {
 	ShareCode    string `json:"share_code"`
 	ReceiveCode  string `json:"receive_code"`
+	ShareTitle   string `json:"share_title"`
 	Status       string `json:"status"`
 	FailureCount int    `json:"failure_count"`
 	LastError    string `json:"last_error"`
@@ -211,6 +214,7 @@ func (s *Server) handleShareList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, ShareProgress{
 			ShareCode:    share.ShareCode,
 			ReceiveCode:  share.ReceiveCode,
+			ShareTitle:   share.ShareTitle,
 			Status:       share.Status,
 			FailureCount: share.FailureCount,
 			LastError:    share.LastError,
@@ -227,6 +231,10 @@ func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete {
 		s.handleShareDelete(w, r, rest)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		s.handleShareRename(w, r, rest)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -246,6 +254,7 @@ func (s *Server) handleShareDetail(w http.ResponseWriter, r *http.Request) {
 	progress := ShareProgress{
 		ShareCode:    share.ShareCode,
 		ReceiveCode:  share.ReceiveCode,
+		ShareTitle:   share.ShareTitle,
 		Status:       share.Status,
 		FailureCount: share.FailureCount,
 		LastError:    share.LastError,
@@ -314,7 +323,7 @@ func (s *Server) handleShareDelete(w http.ResponseWriter, r *http.Request, share
 	force := r.URL.Query().Get("force") == "true"
 	if fileCount > 0 && !force {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":     fmt.Sprintf("share has %d files; pass force=true to delete", fileCount),
+			"error":      fmt.Sprintf("share has %d files; pass force=true to delete", fileCount),
 			"share_code": shareCode,
 			"file_count": fileCount,
 		})
@@ -335,6 +344,58 @@ func (s *Server) handleShareDelete(w http.ResponseWriter, r *http.Request, share
 		"deleted":    true,
 		"file_count": fileCount,
 	})
+}
+
+type renameShareRequest struct {
+	ShareTitle string `json:"share_title"`
+}
+
+// handleShareRename implements PATCH /shares/{code} with body
+// {"share_title":"..."}: sets the share's display title. A blank title is
+// rejected (400); an unknown share returns 404; a title already in use by
+// another share returns 409 (with the conflicting share_code). Titles are
+// trimmed and compared case-sensitively, matching DedupeShareTitles. Only
+// share_title is honored — other share columns are untouched.
+func (s *Server) handleShareRename(w http.ResponseWriter, r *http.Request, shareCode string) {
+	if shareCode == "" {
+		http.Error(w, "share code required", http.StatusBadRequest)
+		return
+	}
+	var req renameShareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	title := strings.TrimSpace(req.ShareTitle)
+	if title == "" {
+		http.Error(w, "share_title required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	if _, ok, err := s.store.GetShare(ctx, shareCode); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if conflict, ok, err := s.store.FindShareTitleConflict(ctx, title, shareCode); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if ok {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      "share_title is already in use",
+			"share_code": shareCode,
+			"conflict":   conflict,
+		})
+		return
+	}
+	if _, err := s.store.RenameShareTitle(ctx, shareCode, title); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.logger.Printf("event=share_renamed share=%s title=%q", shareCode, title)
+	writeJSON(w, http.StatusOK, map[string]string{"share_code": shareCode, "share_title": title})
 }
 
 // requireControl writes a 503 and returns false when no crawler control is

@@ -93,8 +93,9 @@ func TestRenameShareTitle(t *testing.T) {
 		t.Fatalf("seed share: %v", err)
 	}
 
-	if err := s.RenameShareTitle(ctx, "sw1", "Renamed"); err != nil {
-		t.Fatalf("rename: %v", err)
+	ok, err := s.RenameShareTitle(ctx, "sw1", "Renamed")
+	if err != nil || !ok {
+		t.Fatalf("rename: ok=%v err=%v", ok, err)
 	}
 	got, ok, err := s.GetShare(ctx, "sw1")
 	if err != nil || !ok {
@@ -107,9 +108,59 @@ func TestRenameShareTitle(t *testing.T) {
 		t.Fatalf("rename touched other columns: %#v", got)
 	}
 
-	// Renaming a share that does not exist is a no-op, not an error.
-	if err := s.RenameShareTitle(ctx, "nope", "Whatever"); err != nil {
-		t.Fatalf("rename missing share: %v", err)
+	// Renaming a share that does not exist returns ok=false (for 404), no error.
+	ok, err = s.RenameShareTitle(ctx, "nope", "Whatever")
+	if err != nil || ok {
+		t.Fatalf("rename missing share: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFindShareTitleConflict(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	for _, sh := range []struct{ code, title string }{
+		{"sw1", "原盘精选"},
+		{"sw2", "原盘精选"},       // collides with sw1
+		{"sw3", "  Padded  "}, // whitespace around title
+		{"sw4", "独一份"},        // unique
+	} {
+		if err := s.UpdateShareMeta(ctx, sh.code, "rc", sh.title, 0); err != nil {
+			t.Fatalf("seed %s: %v", sh.code, err)
+		}
+	}
+
+	// Renaming sw1 to a title only sw2 also holds -> conflict on sw2.
+	code, ok, err := s.FindShareTitleConflict(ctx, "原盘精选", "sw1")
+	if err != nil || !ok {
+		t.Fatalf("conflict sw1: ok=%v err=%v", ok, err)
+	}
+	if code != "sw2" {
+		t.Fatalf("conflict code = %q, want sw2", code)
+	}
+
+	// A title no share holds -> no conflict.
+	if _, ok, err := s.FindShareTitleConflict(ctx, "missing", "sw9"); ok || err != nil {
+		t.Fatalf("missing title: ok=%v err=%v", ok, err)
+	}
+
+	// A title held only by the share being renamed (itself) -> no conflict.
+	if _, ok, err := s.FindShareTitleConflict(ctx, "独一份", "sw4"); ok || err != nil {
+		t.Fatalf("self title: ok=%v err=%v", ok, err)
+	}
+
+	// Whitespace is trimmed before comparing: "  Padded  " (stored) collides
+	// with a trimmed "Padded" query, mirroring DedupeShareTitles grouping.
+	if code, ok, err := s.FindShareTitleConflict(ctx, "Padded", "sw1"); err != nil || !ok || code != "sw3" {
+		t.Fatalf("trim conflict: code=%q ok=%v err=%v", code, ok, err)
+	}
+	// An untrimmed input is also trimmed by the method.
+	if _, ok, err := s.FindShareTitleConflict(ctx, "  Padded  ", "sw1"); err != nil || !ok {
+		t.Fatalf("untrimmed input: ok=%v err=%v", ok, err)
 	}
 }
 

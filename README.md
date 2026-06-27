@@ -106,6 +106,7 @@ Useful endpoints while running:
 - `GET /status` on `admin-addr`: current share count, indexed file count, pending index events
 - `GET /shares` on `admin-addr`: all registered shares with current status and failure state
 - `GET /shares/<share_code>` on `admin-addr`: one share's detailed progress, including checkpoint queue size, visited count, and next page offset
+- `PATCH /shares/<share_code>` on `admin-addr`: rename a share. Body `{"share_title":"New Name"}`; blank titles are rejected with `400`, unknown shares with `404`, and a title already in use by another share with `409` (response includes the conflicting `share_code`). Titles are trimmed before comparing. `GET /shares` and `GET /shares/<share_code>` both return the current `share_title`.
 - `POST /shares` on `admin-addr`: add a new share task while the service is running
 - `DELETE /shares/<share_code>` on `admin-addr`: remove a share and all of its data — files, BFS checkpoint (queue/visited/offset), and the share row. Refused with `409` if the share still has indexed files unless `?force=true` is passed.
 - `POST /shares/<share_code>/reactivate` on `admin-addr`: reset a shelved/quarantined/dead share back to `ACTIVE` (clears failure count, last error, and retry-after) so the scheduler picks it up again

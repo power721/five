@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -67,11 +68,39 @@ func planShareRenames(shares []model.Share) []model.ShareRename {
 	return renames
 }
 
-// RenameShareTitle sets share_title for every row with share_code, leaving
-// file_size, status, and version untouched. Used by DedupeShareTitles.
-func (s *Store) RenameShareTitle(ctx context.Context, shareCode, newTitle string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE share SET share_title=? WHERE share_code=?`, newTitle, shareCode)
-	return err
+// RenameShareTitle sets share_title for the row with share_code, leaving
+// file_size, status, and version untouched. Returns (false, nil) when no share
+// matches shareCode (so callers can answer 404). Used by DedupeShareTitles and
+// the rename API.
+func (s *Store) RenameShareTitle(ctx context.Context, shareCode, newTitle string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE share SET share_title=? WHERE share_code=?`, newTitle, shareCode)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// FindShareTitleConflict reports whether a share other than excludeCode already
+// holds newTitle. Both sides are whitespace-trimmed before comparing, matching
+// the grouping used by DedupeShareTitles and the rename endpoint. Returns the
+// colliding share_code and ok=true when a conflict exists.
+func (s *Store) FindShareTitleConflict(ctx context.Context, newTitle, excludeCode string) (string, bool, error) {
+	title := strings.TrimSpace(newTitle)
+	var code string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT share_code FROM share WHERE TRIM(share_title) = ? AND share_code <> ? LIMIT 1`,
+		title, excludeCode).Scan(&code)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return code, true, nil
 }
 
 // DedupeShareTitles plans title renames over all shares and, unless dryRun,
@@ -87,7 +116,7 @@ func (s *Store) DedupeShareTitles(ctx context.Context, dryRun bool) ([]model.Sha
 		return renames, nil
 	}
 	for _, r := range renames {
-		if err := s.RenameShareTitle(ctx, r.ShareCode, r.To); err != nil {
+		if _, err := s.RenameShareTitle(ctx, r.ShareCode, r.To); err != nil {
 			return nil, fmt.Errorf("rename share %s: %w", r.ShareCode, err)
 		}
 	}

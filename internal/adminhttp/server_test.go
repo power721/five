@@ -26,12 +26,18 @@ type fakeStore struct {
 	allFilesErr    error
 	reactivated    []string
 	deleted        []string
+	renamed        []renameCall
 	fileStats      map[string]fakeFileStats
 }
 
 type fakeFileStats struct {
 	count int
 	total int64
+}
+
+type renameCall struct {
+	code  string
+	title string
 }
 
 func (f *fakeStore) ListSharesForCrawl(context.Context, int64) ([]model.Share, error) {
@@ -111,6 +117,33 @@ func (f *fakeStore) DeleteShare(_ context.Context, shareCode string) (bool, erro
 	return false, nil
 }
 
+func (f *fakeStore) RenameShareTitle(_ context.Context, shareCode, newTitle string) (bool, error) {
+	for i, share := range f.shares {
+		if share.ShareCode == shareCode {
+			f.shares[i].ShareTitle = newTitle
+			f.renamed = append(f.renamed, renameCall{code: shareCode, title: newTitle})
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) FindShareTitleConflict(_ context.Context, newTitle, excludeCode string) (string, bool, error) {
+	title := strings.TrimSpace(newTitle)
+	if title == "" {
+		return "", false, nil
+	}
+	for _, share := range f.shares {
+		if share.ShareCode == excludeCode {
+			continue
+		}
+		if strings.TrimSpace(share.ShareTitle) == title {
+			return share.ShareCode, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func TestServerReactivateShare(t *testing.T) {
 	store := &fakeStore{
 		shares: []model.Share{
@@ -173,7 +206,7 @@ func TestServerDeleteShare(t *testing.T) {
 
 	// Share with files, no force -> 409, nothing deleted.
 	store = &fakeStore{
-		shares:   []model.Share{{ShareCode: "full", Status: "ACTIVE"}},
+		shares:    []model.Share{{ShareCode: "full", Status: "ACTIVE"}},
 		fileStats: map[string]fakeFileStats{"full": {count: 5, total: 100}},
 	}
 	srv = New(store, nil, &bytes.Buffer{})
@@ -219,6 +252,102 @@ func TestServerDeleteShare(t *testing.T) {
 	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("detail GET status = %d, want 200", rr.Code)
+	}
+}
+
+func TestServerRenameShare(t *testing.T) {
+	store := &fakeStore{
+		shares: []model.Share{
+			{ShareCode: "sw1", Status: "ACTIVE", ShareTitle: "Old"},
+		},
+	}
+	srv := New(store, nil, &bytes.Buffer{})
+
+	// Happy path: PATCH trims and sets the title, returns 200 with the new title.
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/shares/sw1",
+		bytes.NewBufferString(`{"share_title":"  My Movies  "}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.renamed) != 1 || store.renamed[0].code != "sw1" || store.renamed[0].title != "My Movies" {
+		t.Fatalf("renamed = %#v, want sw1/My Movies", store.renamed)
+	}
+	if store.shares[0].ShareTitle != "My Movies" {
+		t.Fatalf("share title = %q, want My Movies (trimmed)", store.shares[0].ShareTitle)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["share_code"] != "sw1" || resp["share_title"] != "My Movies" {
+		t.Fatalf("response = %v, want sw1/My Movies", resp)
+	}
+
+	// Whitespace-only title -> 400, store untouched.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/shares/sw1",
+		bytes.NewBufferString(`{"share_title":"   "}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("blank title status = %d, want 400", rr.Code)
+	}
+	if len(store.renamed) != 1 {
+		t.Fatalf("blank title should not rename; renamed = %#v", store.renamed)
+	}
+
+	// Malformed JSON body -> 400.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/shares/sw1",
+		bytes.NewBufferString(`{not json`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("malformed body status = %d, want 400", rr.Code)
+	}
+
+	// Unknown share -> 404.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/shares/nope",
+		bytes.NewBufferString(`{"share_title":"X"}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown share status = %d, want 404", rr.Code)
+	}
+
+	// Duplicate title -> 409, rename not applied.
+	store = &fakeStore{
+		shares: []model.Share{
+			{ShareCode: "sw1", Status: "ACTIVE", ShareTitle: "Old"},
+			{ShareCode: "sw2", Status: "ACTIVE", ShareTitle: "Taken"},
+		},
+	}
+	srv = New(store, nil, &bytes.Buffer{})
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/shares/sw1",
+		bytes.NewBufferString(`{"share_title":"Taken"}`)))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("duplicate title status = %d, want 409; body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.renamed) != 0 {
+		t.Fatalf("duplicate title must not rename; renamed = %#v", store.renamed)
+	}
+	var conflict map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	if conflict["conflict"] != "sw2" {
+		t.Fatalf("409 conflict = %v, want sw2", conflict["conflict"])
+	}
+
+	// Detail GET still works (routing must not swallow it).
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/shares/sw1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail GET status = %d, want 200", rr.Code)
+	}
+
+	// Wrong method on the detail route is still rejected.
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/shares/sw1", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT status = %d, want 405", rr.Code)
 	}
 }
 
@@ -316,7 +445,7 @@ func TestPostSharesAcceptsUploadedSharesFile(t *testing.T) {
 func TestSharesReturnsAllRegisteredShares(t *testing.T) {
 	store := &fakeStore{
 		shares: []model.Share{
-			{ShareCode: "sw1", ReceiveCode: "a", Status: "ACTIVE", FailureCount: 0},
+			{ShareCode: "sw1", ReceiveCode: "a", Status: "ACTIVE", FailureCount: 0, ShareTitle: "Movies"},
 			{ShareCode: "sw2", ReceiveCode: "b", Status: "STALE", FailureCount: 2},
 		},
 		crawlShares: []model.Share{
@@ -341,6 +470,9 @@ func TestSharesReturnsAllRegisteredShares(t *testing.T) {
 	}
 	if body[1].ShareCode != "sw2" || body[1].Status != "STALE" || body[1].FailureCount != 2 {
 		t.Fatalf("share[1] = %#v", body[1])
+	}
+	if body[0].ShareTitle != "Movies" {
+		t.Fatalf("share[0].share_title = %q, want Movies", body[0].ShareTitle)
 	}
 }
 
@@ -399,7 +531,7 @@ func TestShareDetailReturnsCheckpointProgress(t *testing.T) {
 func TestShareDetailReturnsLinkFileCountAndTotalSize(t *testing.T) {
 	store := &fakeStore{
 		shares: []model.Share{
-			{ShareCode: "sw1", ReceiveCode: "echo", Status: "ACTIVE"},
+			{ShareCode: "sw1", ReceiveCode: "echo", Status: "ACTIVE", ShareTitle: "My Share"},
 		},
 		fileStats: map[string]fakeFileStats{
 			"sw1": {count: 2, total: 3500},
@@ -430,6 +562,9 @@ func TestShareDetailReturnsLinkFileCountAndTotalSize(t *testing.T) {
 	// Existing detail fields are preserved.
 	if body.ShareCode != "sw1" || body.Status != "ACTIVE" {
 		t.Fatalf("existing fields lost: %#v", body)
+	}
+	if body.ShareTitle != "My Share" {
+		t.Fatalf("share_title = %q, want My Share", body.ShareTitle)
 	}
 }
 
