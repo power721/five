@@ -35,6 +35,8 @@ Example `.env`:
 ```bash
 FIVE_PROXY_KEY=your-proxy-key
 FIVE_PROXY_PASSWORD=your-proxy-password
+FIVE_SERVER_IP=203.0.113.10        # deploy.sh / cook.sh deploy & download target
+# FIVE_SSH_USER=ubuntu            # optional, defaults to ubuntu
 ```
 
 ### Modes
